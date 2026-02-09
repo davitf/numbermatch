@@ -1,0 +1,539 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Number Match Solver</title>
+<style>
+  :root { --green: #4CAF50; --orange: #FF9800; --bg: #FAFAFA; }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    max-width: 560px; margin: 0 auto; padding: 20px; background: var(--bg);
+    color: #333;
+  }
+  h1 { color: #333; border-bottom: 2px solid var(--green); padding-bottom: 8px; margin-bottom: 20px; }
+  h2 { color: #555; margin: 32px 0 12px; }
+
+  .input-section {
+    background: #fff; border-radius: 8px; padding: 20px;
+    box-shadow: 0 1px 3px rgba(0,0,0,.1); margin-bottom: 20px;
+  }
+  .input-section label { font-weight: 600; display: block; margin-bottom: 6px; }
+  .input-section textarea {
+    width: 100%; height: 120px; font-family: monospace; font-size: 16px;
+    padding: 10px; border: 1px solid #ccc; border-radius: 6px; resize: vertical;
+  }
+  .input-section textarea:focus { outline: none; border-color: var(--green); }
+  .btn {
+    display: inline-block; margin-top: 12px; padding: 10px 28px;
+    background: var(--green); color: #fff; border: none; border-radius: 6px;
+    font-size: 15px; font-weight: 600; cursor: pointer; transition: background .2s;
+  }
+  .btn:hover { background: #43A047; }
+  .btn:disabled { background: #aaa; cursor: not-allowed; }
+  .hint { font-size: 12px; color: #999; margin-top: 6px; }
+
+  #status {
+    font-size: 14px; color: #555; padding: 8px 0; min-height: 24px;
+    font-family: monospace; white-space: pre-wrap;
+  }
+  #results { margin-top: 12px; }
+
+  .step {
+    background: #fff; border-radius: 8px; padding: 16px; margin: 16px 0;
+    box-shadow: 0 1px 3px rgba(0,0,0,.1);
+  }
+  .step-title { font-weight: 700; margin-bottom: 4px; color: #444; }
+  .move-list { font-size: 13px; color: #666; margin: 4px 0 12px; line-height: 1.7; }
+  .move-item {
+    display: inline-block; background: #F5F5F5; border-radius: 4px;
+    padding: 1px 6px; margin: 2px; white-space: nowrap;
+  }
+  .extend-banner {
+    background: #FFF3E0; border-left: 4px solid var(--orange);
+    padding: 12px 16px; margin: 24px 0; border-radius: 4px;
+    font-weight: 700; color: #E65100;
+  }
+  .final { background: #E8F5E9; }
+  .row-removed { font-size: 12px; color: #E65100; font-style: italic; margin-top: 4px; }
+  .summary {
+    background: #E8F5E9; border-left: 4px solid var(--green);
+    padding: 14px 18px; margin: 20px 0; border-radius: 4px;
+    font-weight: 700; color: #2E7D32; font-size: 15px;
+  }
+</style>
+</head>
+<body>
+<h1>Number Match Solver</h1>
+
+<div class="input-section">
+  <label for="board-input">Enter board</label>
+  <textarea id="board-input" placeholder="147179814
+786565452
+557892137
+61656" spellcheck="false">147179814
+786565452
+557892137
+61656</textarea>
+  <div class="hint">Digits 1-9 for numbers, <code>.</code> for cleared cells. One row per line.</div>
+  <button class="btn" id="solve-btn" onclick="startSolve()">Solve</button>
+</div>
+
+<div id="status"></div>
+<div id="results"></div>
+
+<script>
+"use strict";
+
+// ─── Constants ───────────────────────────────────────────────────────────────
+const ROW_SIZE = 9;
+const CELL_SIZE = 50;
+const LINE_COLORS = [
+  "#E53935","#1E88E5","#43A047","#FB8C00","#8E24AA",
+  "#00ACC1","#D81B60","#6D4C41","#546E7A","#FFB300",
+  "#7CB342","#039BE5","#C0CA33","#F4511E","#5E35B1",
+];
+
+// ─── Board helpers ───────────────────────────────────────────────────────────
+function parseBoard(str) {
+  const lines = str.trim().split("\n").map(l => l.trim()).filter(Boolean);
+  const board = [];
+  for (const line of lines) {
+    const row = [];
+    for (const ch of line) {
+      if (ch === ".") row.push(0);
+      else if (ch >= "1" && ch <= "9") row.push(+ch);
+    }
+    while (row.length < ROW_SIZE) row.push(-1);
+    board.push(...row);
+  }
+  return board;
+}
+
+function getRowCol(idx) { return [Math.floor(idx / ROW_SIZE), idx % ROW_SIZE]; }
+function getIndex(r, c) { return r * ROW_SIZE + c; }
+
+function isValidPair(board, i, j) {
+  const a = board[i], b = board[j];
+  if (a <= 0 || b <= 0) return false;
+  return a === b || a + b === 10;
+}
+
+function findNextInDir(board, row, col, dr, dc, nRows) {
+  let r = row + dr, c = col + dc;
+  while (r >= 0 && r < nRows && c >= 0 && c < ROW_SIZE) {
+    const idx = r * ROW_SIZE + c;
+    if (board[idx] > 0) return idx;
+    r += dr; c += dc;
+  }
+  return -1;
+}
+
+function findAllMoves(board) {
+  const moves = [];
+  const n = board.length;
+  const nRows = n / ROW_SIZE;
+  for (let i = 0; i < n; i++) {
+    if (board[i] <= 0) continue;
+    const vi = board[i];
+    const ri = Math.floor(i / ROW_SIZE), ci = i % ROW_SIZE;
+
+    // 1) Horizontal / adjacent: next non-empty in 1D
+    for (let k = i + 1; k < n; k++) {
+      if (board[k] > 0) {
+        if (vi === board[k] || vi + board[k] === 10) moves.push([i, k]);
+        break;
+      }
+    }
+    // 2) Vertical down
+    let j = findNextInDir(board, ri, ci, 1, 0, nRows);
+    if (j > i && isValidPair(board, i, j)) moves.push([i, j]);
+    // 3) Diagonal down-right
+    j = findNextInDir(board, ri, ci, 1, 1, nRows);
+    if (j > i && isValidPair(board, i, j)) moves.push([i, j]);
+    // 4) Diagonal down-left
+    j = findNextInDir(board, ri, ci, 1, -1, nRows);
+    if (j > i && isValidPair(board, i, j)) moves.push([i, j]);
+  }
+  return moves;
+}
+
+function applyMove(board, i, j) {
+  const b = board.slice();
+  b[i] = 0; b[j] = 0;
+  // Remove fully empty rows
+  const kept = [];
+  for (let r = 0; r < b.length / ROW_SIZE; r++) {
+    const start = r * ROW_SIZE;
+    const row = b.slice(start, start + ROW_SIZE);
+    if (row.some(v => v > 0)) kept.push(...row);
+  }
+  return kept;
+}
+
+function extendBoard(board) {
+  const remaining = board.filter(v => v > 0);
+  let lastIndex = -1;
+  for (let i = board.length - 1; i >= 0; i--) {
+    if (board[i] !== -1) { lastIndex = i; break; }
+  }
+  let newBoard;
+  if (lastIndex === -1) { newBoard = []; }
+  else {
+    newBoard = board.slice(0, lastIndex + 1);
+    while (newBoard.length && newBoard[newBoard.length - 1] === -1) newBoard.pop();
+  }
+  newBoard.push(...remaining);
+  while (newBoard.length % ROW_SIZE !== 0) newBoard.push(-1);
+  return newBoard;
+}
+
+function remainingCount(board) {
+  let c = 0;
+  for (let i = 0; i < board.length; i++) if (board[i] > 0) c++;
+  return c;
+}
+
+function boardKey(board) { return board.join(","); }
+
+// ─── Solver ──────────────────────────────────────────────────────────────────
+function solve(board, topK = 5) {
+  const visited = new Set();
+  const topResults = []; // [{seq:[...], board:[...]}]
+  let maxTopRemaining = Infinity;
+  let statesExplored = 0;
+  let solved = false;
+
+  function dfs(curBoard, curSeq) {
+    if (solved) return;
+    const key = boardKey(curBoard);
+    if (visited.has(key)) return;
+    visited.add(key);
+    statesExplored++;
+
+    const moves = findAllMoves(curBoard);
+    if (moves.length === 0) {
+      const curRemaining = remainingCount(curBoard);
+      const curKey = [curRemaining, curSeq.length];
+      const worstKey = topResults.length
+        ? [remainingCount(topResults[topResults.length - 1].board),
+           topResults[topResults.length - 1].seq.length]
+        : [Infinity, Infinity];
+
+      if (topResults.length < topK ||
+          curKey[0] < worstKey[0] || (curKey[0] === worstKey[0] && curKey[1] < worstKey[1])) {
+        topResults.push({ seq: curSeq.slice(), board: curBoard.slice() });
+        topResults.sort((a, b) => {
+          const ra = remainingCount(a.board), rb = remainingCount(b.board);
+          return ra !== rb ? ra - rb : a.seq.length - b.seq.length;
+        });
+        if (topResults.length > topK) topResults.pop();
+        maxTopRemaining = topResults.length
+          ? remainingCount(topResults[topResults.length - 1].board) : Infinity;
+        if (curRemaining === 0) solved = true;
+      }
+      return;
+    }
+
+    for (const move of moves) {
+      if (solved) return;
+      const newBoard = applyMove(curBoard, move[0], move[1]);
+      curSeq.push(move);
+      dfs(newBoard, curSeq);
+      curSeq.pop();
+    }
+  }
+
+  dfs(board, []);
+  return { results: topResults, states: statesExplored };
+}
+
+// ─── Display helpers ─────────────────────────────────────────────────────────
+function hasClearPath(i, j, board) {
+  if (i === j) return false;
+  if (i > j) { let t = i; i = j; j = t; }
+  const [ri, ci] = getRowCol(i);
+  const [rj, cj] = getRowCol(j);
+
+  // All cells between i and j empty?
+  let allEmpty = true;
+  for (let k = i + 1; k < j; k++) { if (board[k] > 0) { allEmpty = false; break; } }
+  if (allEmpty) return true;
+
+  // Vertical
+  if (ci === cj) {
+    for (let r = ri + 1; r < rj; r++) { if (board[getIndex(r, ci)] > 0) return false; }
+    return true;
+  }
+  // Diagonal
+  const rd = rj - ri, cd = cj - ci;
+  if (Math.abs(rd) === Math.abs(cd)) {
+    const cs = cd > 0 ? 1 : -1;
+    let c = ci;
+    for (let r = ri + 1; r < rj; r++) {
+      c += cs;
+      if (c < 0 || c >= ROW_SIZE) return false;
+      if (board[getIndex(r, c)] > 0) return false;
+    }
+    return true;
+  }
+  return false;
+}
+
+function isMoveValidOnBoard(board, move) {
+  const [i, j] = move;
+  if (i >= board.length || j >= board.length) return false;
+  return isValidPair(board, i, j) && hasClearPath(i, j, board);
+}
+
+function groupMovesForDisplay(startBoard, moves) {
+  // Step 1: split into macro groups at row-removal boundaries
+  const macroGroups = [];
+  let currentBoard = startBoard;
+  let currentMacro = [];
+  let macroStartBoard = startBoard;
+
+  for (const move of moves) {
+    const prevLen = currentBoard.length;
+    currentBoard = applyMove(currentBoard, move[0], move[1]);
+    currentMacro.push(move);
+    if (currentBoard.length < prevLen) {
+      macroGroups.push({ board: macroStartBoard, moves: currentMacro, hasRowRemoval: true });
+      macroStartBoard = currentBoard;
+      currentMacro = [];
+    }
+  }
+  if (currentMacro.length) {
+    macroGroups.push({ board: macroStartBoard, moves: currentMacro, hasRowRemoval: false });
+  }
+
+  // Step 2: within each macro group, sub-group by independence
+  const result = [];
+  for (const mg of macroGroups) {
+    let current = mg.board;
+    let remaining = mg.moves.slice();
+
+    while (remaining.length) {
+      const subgroup = [], deferred = [];
+      for (const mv of remaining) {
+        if (isMoveValidOnBoard(current, mv)) subgroup.push(mv);
+        else deferred.push(mv);
+      }
+      if (!subgroup.length) break;
+
+      let nextBoard = current;
+      for (const mv of subgroup) nextBoard = applyMove(nextBoard, mv[0], mv[1]);
+
+      let rowRemovalIdx = -1;
+      if (!deferred.length && mg.hasRowRemoval) {
+        for (let k = subgroup.length - 1; k >= 0; k--) {
+          let testBoard = current;
+          for (let m = 0; m < subgroup.length; m++) {
+            if (m !== k) testBoard = applyMove(testBoard, subgroup[m][0], subgroup[m][1]);
+          }
+          const before = testBoard.length;
+          const after = applyMove(testBoard, subgroup[k][0], subgroup[k][1]);
+          if (after.length < before) { rowRemovalIdx = k; break; }
+        }
+      }
+
+      result.push({ board: current, moves: subgroup, rowRemovalIdx });
+      current = nextBoard;
+      remaining = deferred;
+    }
+  }
+  return result;
+}
+
+function boardToSvg(board, moves, highlightIdx) {
+  if (!board || !board.length) {
+    return '<div style="color:#4CAF50;font-weight:bold;padding:8px">Board cleared!</div>';
+  }
+  moves = moves || [];
+  highlightIdx = highlightIdx ?? -1;
+
+  const nRows = board.length / ROW_SIZE;
+  const w = ROW_SIZE * CELL_SIZE, h = nRows * CELL_SIZE;
+  const highlighted = new Set();
+  for (const [mi, mj] of moves) { highlighted.add(mi); highlighted.add(mj); }
+
+  let svg = `<svg width="${w}" height="${h}" xmlns="http://www.w3.org/2000/svg" style="display:block">`;
+
+  for (let idx = 0; idx < board.length; idx++) {
+    const [r, c] = getRowCol(idx);
+    const x = c * CELL_SIZE, y = r * CELL_SIZE;
+    const val = board[idx];
+    let fill, stroke;
+    if (highlighted.has(idx))      { fill = "#C8E6C9"; stroke = "#4CAF50"; }
+    else if (val > 0)              { fill = "#F5F5F5"; stroke = "#DDD"; }
+    else if (val === 0)            { fill = "#FAFAFA"; stroke = "#EEE"; }
+    else                           { fill = "#FFF";    stroke = "#F5F5F5"; }
+
+    svg += `<rect x="${x+2}" y="${y+2}" width="${CELL_SIZE-4}" height="${CELL_SIZE-4}" ` +
+           `fill="${fill}" stroke="${stroke}" rx="4"/>`;
+
+    if (val > 0) {
+      const fw = highlighted.has(idx) ? "bold" : "normal";
+      svg += `<text x="${x+CELL_SIZE/2}" y="${y+CELL_SIZE/2+7}" ` +
+             `text-anchor="middle" font-size="20" font-family="monospace" ` +
+             `font-weight="${fw}" fill="#333">${val}</text>`;
+    } else if (val === 0) {
+      svg += `<text x="${x+CELL_SIZE/2}" y="${y+CELL_SIZE/2+5}" ` +
+             `text-anchor="middle" font-size="16" fill="#CCC">\u00b7</text>`;
+    }
+  }
+
+  for (let k = 0; k < moves.length; k++) {
+    const [mi, mj] = moves[k];
+    const [ri, ci] = getRowCol(mi), [rj, cj] = getRowCol(mj);
+    const x1 = ci*CELL_SIZE + CELL_SIZE/2, y1 = ri*CELL_SIZE + CELL_SIZE/2;
+    const x2 = cj*CELL_SIZE + CELL_SIZE/2, y2 = rj*CELL_SIZE + CELL_SIZE/2;
+    const color = LINE_COLORS[k % LINE_COLORS.length];
+    const sw = k === highlightIdx ? 5 : 3;
+    const op = k === highlightIdx ? 0.9 : 0.7;
+    svg += `<line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" ` +
+           `stroke="${color}" stroke-width="${sw}" stroke-linecap="round" opacity="${op}"/>`;
+  }
+  svg += "</svg>";
+  return svg;
+}
+
+// ─── HTML generation ─────────────────────────────────────────────────────────
+function renderSolution(initialBoard, phases) {
+  let html = "";
+  let moveCounter = 0, stepCounter = 0;
+
+  for (let pi = 0; pi < phases.length; pi++) {
+    const { label, startBoard, moves } = phases[pi];
+    html += `<h2>${label}</h2>`;
+
+    if (pi > 0) {
+      html += `<div class="extend-banner">\u27f3 Board extended &mdash; remaining numbers duplicated</div>`;
+      html += `<div class="step"><div class="step-title">Extended board</div>${boardToSvg(startBoard)}</div>`;
+    }
+
+    const groups = groupMovesForDisplay(startBoard, moves);
+
+    for (const { board: gBoard, moves: gMoves, rowRemovalIdx } of groups) {
+      stepCounter++;
+      const rowsRemoved = rowRemovalIdx >= 0;
+      const descs = gMoves.map(([mi, mj]) => {
+        moveCounter++;
+        return `<span class="move-item">${gBoard[mi]} \u2194 ${gBoard[mj]}</span>`;
+      });
+      const n = gMoves.length;
+      html += `<div class="step">`;
+      html += `<div class="step-title">Step ${stepCounter}: ${n} move${n!==1?"s":""}` +
+              `${rowsRemoved ? " (removes row)" : ""}</div>`;
+      html += `<div class="move-list">${descs.join(" ")}</div>`;
+      html += boardToSvg(gBoard, gMoves, rowRemovalIdx);
+
+      if (rowsRemoved) {
+        let temp = gBoard;
+        for (const mv of gMoves) temp = applyMove(temp, mv[0], mv[1]);
+        const nRemoved = (gBoard.length - temp.length) / ROW_SIZE;
+        html += `<div class="row-removed">\u2191 ${nRemoved} empty row${nRemoved!==1?"s":""} ` +
+                `removed after this step</div>`;
+      }
+      html += `</div>`;
+    }
+
+    // Final board after phase
+    let finalBoard = startBoard;
+    for (const mv of moves) finalBoard = applyMove(finalBoard, mv[0], mv[1]);
+    const rem = remainingCount(finalBoard);
+    html += `<div class="step final"><div class="step-title">After ${label}: ` +
+            `${rem} cell${rem!==1?"s":""} remaining</div>${boardToSvg(finalBoard)}</div>`;
+  }
+  return html;
+}
+
+// ─── Main solve logic ────────────────────────────────────────────────────────
+function startSolve() {
+  const btn = document.getElementById("solve-btn");
+  const statusEl = document.getElementById("status");
+  const resultsEl = document.getElementById("results");
+  btn.disabled = true;
+  resultsEl.innerHTML = "";
+  statusEl.textContent = "Solving phase 1...";
+
+  setTimeout(() => {
+    try { runFullSolve(statusEl, resultsEl); }
+    catch (e) { statusEl.textContent = "Error: " + e.message; console.error(e); }
+    finally { btn.disabled = false; }
+  }, 50);
+}
+
+function runFullSolve(statusEl, resultsEl) {
+  const input = document.getElementById("board-input").value;
+  const board = parseBoard(input);
+  if (!board.length || remainingCount(board) === 0) {
+    statusEl.textContent = "Please enter a valid board.";
+    return;
+  }
+
+  const t0 = performance.now();
+
+  // Phase 1
+  const phase1 = solve(board, 5);
+  const p1ms = ((performance.now() - t0) / 1000).toFixed(1);
+  statusEl.textContent = `Phase 1 done in ${p1ms}s (${phase1.states} states). ` +
+    `Best: ${phase1.results.length ? remainingCount(phase1.results[0].board) : "?"} remaining.\n` +
+    `Solving phase 2...`;
+
+  if (!phase1.results.length) {
+    statusEl.textContent = "No moves found!";
+    return;
+  }
+
+  // Force UI update before phase 2
+  setTimeout(() => {
+    try { runPhase2(board, phase1, t0, statusEl, resultsEl); }
+    catch (e) { statusEl.textContent = "Error: " + e.message; console.error(e); }
+    finally { document.getElementById("solve-btn").disabled = false; }
+  }, 50);
+}
+
+function runPhase2(board, phase1, t0, statusEl, resultsEl) {
+  let bestRemaining = Infinity;
+  let bestP1Seq = [], bestP2Seq = [];
+  let bestExtended = [], bestP1Rank = -1;
+
+  for (let rank = 0; rank < phase1.results.length; rank++) {
+    const { seq: p1Seq, board: endBoard } = phase1.results[rank];
+    const extended = extendBoard(endBoard);
+    const p2 = solve(extended, 5);
+
+    if (p2.results.length) {
+      const { seq: p2Seq, board: p2End } = p2.results[0];
+      const finalRem = remainingCount(p2End);
+      if (finalRem < bestRemaining) {
+        bestRemaining = finalRem;
+        bestP1Seq = p1Seq; bestP2Seq = p2Seq;
+        bestExtended = extended; bestP1Rank = rank;
+        if (finalRem === 0) break;
+      }
+    }
+  }
+
+  const elapsed = ((performance.now() - t0) / 1000).toFixed(1);
+  const totalMoves = bestP1Seq.length + bestP2Seq.length;
+  statusEl.textContent = `Done in ${elapsed}s. ` +
+    `Best: ${bestRemaining} remaining, ${totalMoves} total moves.`;
+
+  // Build phases for display
+  const phases = [
+    { label: "Phase 1", startBoard: board, moves: bestP1Seq },
+    { label: "Phase 2", startBoard: bestExtended, moves: bestP2Seq },
+  ];
+
+  let html = `<div class="summary">Best: ${bestRemaining} remaining, ` +
+             `${totalMoves} moves (${bestP1Seq.length} + ${bestP2Seq.length})</div>`;
+  html += renderSolution(board, phases);
+  resultsEl.innerHTML = html;
+}
+</script>
+</body>
+</html>
+
