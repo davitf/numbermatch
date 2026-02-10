@@ -15,6 +15,7 @@ const {
   getRowCol,
   groupMovesForDisplay,
   isMoveValidOnBoard,
+  solveMultiPhase,
 } = require("./solver.js");
 
 function printSolutionWithRowRemovals(initialBoard, sequence, phaseLabel) {
@@ -193,75 +194,69 @@ function main() {
 
   const startTime = Date.now();
 
-  // Phase 1
-  console.log("=== PHASE 1: SOLVING INITIAL BOARD ===");
-  const phase1 = solve(board, 5);
-  const phase1Time = ((Date.now() - startTime) / 1000).toFixed(2);
-
-  console.log(`\nPhase 1 completed in ${phase1Time}s`);
-  console.log(`States explored: ${phase1.states}`);
-  console.log(`Top ${phase1.results.length} results:`);
-  phase1.results.forEach((r, i) => {
-    console.log(`  #${i + 1}: ${r.seq.length} moves, ${remainingCount(r.board)} remaining`);
+  // Use multi-phase solver
+  console.log("=== MULTI-PHASE SOLVER ===");
+  const result = solveMultiPhase(board, 5, 100, (msg) => {
+    console.log(msg);
   });
 
-  if (!phase1.results.length) {
-    console.log("No moves found!");
+  const totalTime = ((Date.now() - startTime) / 1000).toFixed(2);
+
+  console.log(`\n${"=".repeat(60)}`);
+  console.log(`SOLVER SUMMARY`);
+  console.log(`${"=".repeat(60)}`);
+  console.log(`Total time: ${totalTime}s`);
+  console.log(`Total states explored: ${result.totalStatesExplored}`);
+  console.log(`Phases completed: ${result.allPhases.length}`);
+
+  if (!result.bestSolution) {
+    console.log("No solution found!");
     return;
   }
 
-  // Print detailed solution for best result
-  const bestPhase1 = phase1.results[0];
-  const phase1EndBoard = printSolutionWithRowRemovals(
-    board,
-    bestPhase1.seq,
-    "PHASE 1 DETAILED SOLUTION"
-  );
-
-  // Print grouped steps
-  printGroupedSteps(board, bestPhase1.seq, "PHASE 1");
-
-  // Phase 2
-  console.log("\n=== PHASE 2: EXTEND + SOLVE ===");
-  const extended = extendBoard(phase1EndBoard);
-  console.log("Extended board:");
-  printBoard(extended);
-  console.log(`Remaining: ${remainingCount(extended)} cells\n`);
-
-  const phase2StartTime = Date.now();
-  const phase2 = solve(extended, 5);
-  const phase2Time = ((Date.now() - phase2StartTime) / 1000).toFixed(2);
-
-  console.log(`\nPhase 2 completed in ${phase2Time}s`);
-  console.log(`States explored: ${phase2.states}`);
-  console.log(`Top ${phase2.results.length} results:`);
-  phase2.results.forEach((r, i) => {
-    console.log(`  #${i + 1}: ${r.seq.length} moves, ${remainingCount(r.board)} remaining`);
+  const { bestSolution } = result;
+  console.log(`Best solution: ${bestSolution.remaining} remaining, ${bestSolution.totalMoves} total moves`);
+  console.log(`Phases: ${bestSolution.phaseSeqs.length}`);
+  bestSolution.phaseSeqs.forEach((seq, i) => {
+    console.log(`  Phase ${i + 1}: ${seq.length} moves`);
   });
+  console.log(`${"=".repeat(60)}\n`);
 
-  if (phase2.results.length) {
-    const bestPhase2 = phase2.results[0];
-    printSolutionWithRowRemovals(
-      extended,
-      bestPhase2.seq,
-      "PHASE 2 DETAILED SOLUTION"
+  // Print detailed solution for each phase
+  // phaseBoards contains the board BEFORE each phase starts
+  for (let phaseIdx = 0; phaseIdx < bestSolution.phaseSeqs.length; phaseIdx++) {
+    const phaseSeq = bestSolution.phaseSeqs[phaseIdx];
+    const phaseLabel = `PHASE ${phaseIdx + 1} DETAILED SOLUTION`;
+    
+    // Get the starting board for this phase from phaseBoards
+    const phaseStartBoard = bestSolution.phaseBoards[phaseIdx];
+    
+    const phaseEndBoard = printSolutionWithRowRemovals(
+      phaseStartBoard,
+      phaseSeq,
+      phaseLabel
     );
 
     // Print grouped steps
-    printGroupedSteps(extended, bestPhase2.seq, "PHASE 2");
+    printGroupedSteps(phaseStartBoard, phaseSeq, `PHASE ${phaseIdx + 1}`);
 
-    const totalTime = ((Date.now() - startTime) / 1000).toFixed(2);
-    const totalMoves = bestPhase1.seq.length + bestPhase2.seq.length;
-    const finalRemaining = remainingCount(bestPhase2.board);
-
-    console.log(`${"=".repeat(60)}`);
-    console.log(`OVERALL BEST SOLUTION`);
-    console.log(`${"=".repeat(60)}`);
-    console.log(`Total time: ${totalTime}s`);
-    console.log(`Total moves: ${totalMoves} (${bestPhase1.seq.length} + ${bestPhase2.seq.length})`);
-    console.log(`Final remaining: ${finalRemaining} cells`);
-    console.log(`${"=".repeat(60)}\n`);
+    // If not last phase, show extended board (which is the next phase's starting board)
+    if (phaseIdx < bestSolution.phaseSeqs.length - 1) {
+      const nextPhaseBoard = bestSolution.phaseBoards[phaseIdx + 1];
+      console.log("\n[Board extended for next phase]");
+      printBoard(nextPhaseBoard);
+      console.log(`Remaining: ${remainingCount(nextPhaseBoard)} cells\n`);
+    }
   }
+
+  console.log(`${"=".repeat(60)}`);
+  console.log(`FINAL RESULT`);
+  console.log(`${"=".repeat(60)}`);
+  console.log(`Total moves: ${bestSolution.totalMoves}`);
+  console.log(`Final remaining: ${bestSolution.remaining} cells`);
+  console.log(`Final board state:`);
+  printBoard(bestSolution.finalBoard);
+  console.log(`${"=".repeat(60)}\n`);
 }
 
 main();

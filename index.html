@@ -255,9 +255,15 @@ function startSolve() {
   statusEl.textContent = "Solving phase 1...";
 
   setTimeout(() => {
-    try { runFullSolve(statusEl, resultsEl); }
-    catch (e) { statusEl.textContent = "Error: " + e.message; console.error(e); }
-    finally { btn.disabled = false; }
+    try { 
+      runFullSolve(statusEl, resultsEl);
+      btn.disabled = false;
+    }
+    catch (e) { 
+      statusEl.textContent = "Error: " + e.message; 
+      console.error(e); 
+      btn.disabled = false;
+    }
   }, 50);
 }
 
@@ -271,61 +277,32 @@ function runFullSolve(statusEl, resultsEl) {
 
   const t0 = performance.now();
 
-  // Phase 1
-  const phase1 = solve(board, 5);
-  const p1ms = ((performance.now() - t0) / 1000).toFixed(1);
-  statusEl.textContent = `Phase 1 done in ${p1ms}s (${phase1.states} states). ` +
-    `Best: ${phase1.results.length ? remainingCount(phase1.results[0].board) : "?"} remaining.\n` +
-    `Solving phase 2...`;
+  // Use multi-phase solver
+  const result = solveMultiPhase(board, 5, 100, (msg) => {
+    statusEl.textContent = msg;
+  });
 
-  if (!phase1.results.length) {
-    statusEl.textContent = "No moves found!";
+  const elapsed = ((performance.now() - t0) / 1000).toFixed(1);
+
+  if (!result.bestSolution) {
+    statusEl.textContent = "No solution found!";
     return;
   }
 
-  // Force UI update before phase 2
-  setTimeout(() => {
-    try { runPhase2(board, phase1, t0, statusEl, resultsEl); }
-    catch (e) { statusEl.textContent = "Error: " + e.message; console.error(e); }
-    finally { document.getElementById("solve-btn").disabled = false; }
-  }, 50);
-}
-
-function runPhase2(board, phase1, t0, statusEl, resultsEl) {
-  let bestRemaining = Infinity;
-  let bestP1Seq = [], bestP2Seq = [];
-  let bestExtended = [], bestP1Rank = -1;
-
-  for (let rank = 0; rank < phase1.results.length; rank++) {
-    const { seq: p1Seq, board: endBoard } = phase1.results[rank];
-    const extended = extendBoard(endBoard);
-    const p2 = solve(extended, 5);
-
-    if (p2.results.length) {
-      const { seq: p2Seq, board: p2End } = p2.results[0];
-      const finalRem = remainingCount(p2End);
-      if (finalRem < bestRemaining) {
-        bestRemaining = finalRem;
-        bestP1Seq = p1Seq; bestP2Seq = p2Seq;
-        bestExtended = extended; bestP1Rank = rank;
-        if (finalRem === 0) break;
-      }
-    }
-  }
-
-  const elapsed = ((performance.now() - t0) / 1000).toFixed(1);
-  const totalMoves = bestP1Seq.length + bestP2Seq.length;
+  const { bestSolution } = result;
   statusEl.textContent = `Done in ${elapsed}s. ` +
-    `Best: ${bestRemaining} remaining, ${totalMoves} total moves.`;
+    `Best: ${bestSolution.remaining} remaining, ${bestSolution.totalMoves} total moves ` +
+    `(${result.allPhases.length} phase${result.allPhases.length !== 1 ? "s" : ""}).`;
 
-  // Build phases for display
-  const phases = [
-    { label: "Phase 1", startBoard: board, moves: bestP1Seq },
-    { label: "Phase 2", startBoard: bestExtended, moves: bestP2Seq },
-  ];
+  // Build phases for display from bestSolution
+  const phases = bestSolution.phaseSeqs.map((seq, idx) => ({
+    label: `Phase ${idx + 1}`,
+    startBoard: bestSolution.phaseBoards[idx],
+    moves: seq,
+  }));
 
-  let html = `<div class="summary">Best: ${bestRemaining} remaining, ` +
-             `${totalMoves} moves (${bestP1Seq.length} + ${bestP2Seq.length})</div>`;
+  let html = `<div class="summary">Best: ${bestSolution.remaining} remaining, ` +
+             `${bestSolution.totalMoves} moves across ${bestSolution.phaseSeqs.length} phase${bestSolution.phaseSeqs.length !== 1 ? "s" : ""}</div>`;
   html += renderSolution(board, phases);
   resultsEl.innerHTML = html;
 }

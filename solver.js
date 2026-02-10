@@ -108,7 +108,7 @@ function remainingCount(board) {
 function boardKey(board) { return board.join(","); }
 
 // ─── Solver ──────────────────────────────────────────────────────────────────
-function solve(board, topK = 5) {
+function solve(board, topK = 20) {
   const visited = new Set();
   const topResults = []; // [{seq:[...], board:[...]}]
   let maxTopRemaining = Infinity;
@@ -315,6 +315,233 @@ function printBoard(board) {
   }
 }
 
+// ─── Multi-Phase Solver ────────────────────────────────────────────────────────
+function solveExtendedPhase(initialStates, topN, topK, logCallback) {
+  /**
+   * Single extension phase: extends each input state and solves it.
+   * @param {Array} initialStates - Array of {seq: [...], board: [...]} from previous phase
+   * @param {number} topN - Number of results to get from solving each extended board
+   * @param {number} topK - Number of overall best results to return
+   * @param {Function} logCallback - Optional (message: string) => void for logging
+   * @returns {Object} {results: [...], statesExplored: number, foundExactSolution: boolean}
+   */
+  const log = logCallback || (() => {});
+  const allResults = [];
+  let totalStatesExplored = 0;
+  let foundExactSolution = false;
+
+  for (let idx = 0; idx < initialStates.length; idx++) {
+    const state = initialStates[idx];
+    // Handle both old format {seq, board} and new format {seq, board, phaseSeqs, phaseBoards}
+    const prevSeq = state.seq;
+    const prevBoard = state.board;
+    const prevPhaseSeqs = state.phaseSeqs || [prevSeq];
+    const prevPhaseBoards = state.phaseBoards || [prevBoard];
+    
+    const prevRemaining = remainingCount(prevBoard);
+    
+    log(`Trying result #${idx + 1}/${initialStates.length} (${prevSeq.length} moves, ${prevRemaining} remaining)...`);
+
+    // Extend the board
+    const extended = extendBoard(prevBoard);
+    const extendedRemaining = remainingCount(extended);
+    log(`  Extended board: ${extendedRemaining} cells`);
+
+    // Solve extended board
+    const solveResult = solve(extended, topN);
+    totalStatesExplored += solveResult.states;
+
+    if (solveResult.results.length === 0) {
+      log(`  No moves found after extending`);
+      continue;
+    }
+
+    // Combine each solve result with the previous phase sequences
+    for (const { seq: newSeq, board: finalBoard } of solveResult.results) {
+      const finalRemaining = remainingCount(finalBoard);
+      const totalMoves = prevSeq.length + newSeq.length;
+
+      // Merge phase sequences: append new phase sequence
+      const phaseSequences = [...prevPhaseSeqs, newSeq];
+      
+      // Merge phase boards: append extended board (board before this new phase)
+      const phaseBoards = [...prevPhaseBoards, extended];
+
+      allResults.push({
+        phaseSeqs: phaseSequences,
+        phaseBoards: phaseBoards,
+        finalBoard: finalBoard,
+        totalMoves: totalMoves,
+        remaining: finalRemaining,
+      });
+
+      if (finalRemaining === 0) {
+        foundExactSolution = true;
+        log(`  ✓ Found exact solution! (0 remaining, ${totalMoves} total moves)`);
+      }
+    }
+
+    const bestFromThis = solveResult.results[0];
+    const bestRemaining = remainingCount(bestFromThis.board);
+    log(`  Best from this: ${bestRemaining} remaining, ${prevSeq.length + bestFromThis.seq.length} total moves`);
+
+    // Early exit if exact solution found
+    if (foundExactSolution) {
+      break;
+    }
+  }
+
+  // Sort all results by (remaining, totalMoves)
+  allResults.sort((a, b) => {
+    if (a.remaining !== b.remaining) {
+      return a.remaining - b.remaining;
+    }
+    return a.totalMoves - b.totalMoves;
+  });
+
+  // Return topK results
+  const topResults = allResults.slice(0, topK);
+
+  if (topResults.length > 0) {
+    const best = topResults[0];
+    log(`Combined results: best is ${best.remaining} remaining, ${best.totalMoves} total moves`);
+  }
+
+  return {
+    results: topResults,
+    statesExplored: totalStatesExplored,
+    foundExactSolution: foundExactSolution,
+  };
+}
+
+function solveMultiPhase(initialBoard, maxExtensions = 5, topK = 100, logCallback) {
+  /**
+   * Multi-phase orchestrator: continues extending until solution found or max extensions reached.
+   * @param {Array} initialBoard - Starting board state
+   * @param {number} maxExtensions - Maximum number of extension phases (default 5)
+   * @param {number} topK - Number of top results to keep at each phase (default 100)
+   * @param {Function} logCallback - Optional (message: string) => void for logging
+   * @returns {Object} {bestSolution: {...}, allPhases: [...], totalStatesExplored: number}
+   */
+  const log = logCallback || (() => {});
+  const allPhases = [];
+  let totalStatesExplored = 0;
+  let bestSolution = null;
+
+  // Phase 1: Solve initial board
+  log(`Phase 1: Solving initial board...`);
+  const phase1 = solve(initialBoard, topK);
+  totalStatesExplored += phase1.states;
+  
+  if (phase1.results.length === 0) {
+    log(`Phase 1: No moves found!`);
+    return {
+      bestSolution: null,
+      allPhases: [{ phaseNum: 1, statesExplored: phase1.states, topResults: [] }],
+      totalStatesExplored: totalStatesExplored,
+    };
+  }
+
+  const phase1Best = phase1.results[0];
+  const phase1Remaining = remainingCount(phase1Best.board);
+  log(`Phase 1: Found ${phase1.results.length} results, best: ${phase1Remaining} remaining`);
+
+  allPhases.push({
+    phaseNum: 1,
+    statesExplored: phase1.states,
+    topResults: phase1.results,
+  });
+
+  // Check if phase 1 already solved it
+  if (phase1Remaining === 0) {
+    bestSolution = {
+      phaseSeqs: [phase1Best.seq],
+      phaseBoards: [initialBoard], // Board before phase 1
+      finalBoard: phase1Best.board,
+      totalMoves: phase1Best.seq.length,
+      remaining: 0,
+    };
+    log(`Phase 1: Found exact solution! (0 remaining)`);
+    return {
+      bestSolution: bestSolution,
+      allPhases: allPhases,
+      totalStatesExplored: totalStatesExplored,
+    };
+  }
+
+  // Convert phase 1 results to initial states format
+  // Store the initial board for phase 1 results
+  let currentStates = phase1.results.map(r => ({
+    seq: r.seq,
+    board: r.board,
+    phaseSeqs: [r.seq], // Track phase sequences
+    phaseBoards: [initialBoard], // Board before phase 1
+  }));
+
+  // Phase 2+: Extend and solve
+  for (let phaseNum = 2; phaseNum <= maxExtensions; phaseNum++) {
+    log(`\nPhase ${phaseNum}: Extending ${currentStates.length} results...`);
+
+    const extendedPhase = solveExtendedPhase(currentStates, topK, topK, log);
+    totalStatesExplored += extendedPhase.statesExplored;
+
+    if (extendedPhase.results.length === 0) {
+      log(`Phase ${phaseNum}: No results found`);
+      break;
+    }
+
+    const phaseBest = extendedPhase.results[0];
+    log(`Phase ${phaseNum}: Best result: ${phaseBest.remaining} remaining, ${phaseBest.totalMoves} total moves`);
+
+    allPhases.push({
+      phaseNum: phaseNum,
+      statesExplored: extendedPhase.statesExplored,
+      topResults: extendedPhase.results,
+    });
+
+    // Update best solution
+    if (!bestSolution || phaseBest.remaining < bestSolution.remaining ||
+        (phaseBest.remaining === bestSolution.remaining && phaseBest.totalMoves < bestSolution.totalMoves)) {
+      bestSolution = phaseBest;
+    }
+
+    // Early exit if exact solution found
+    if (extendedPhase.foundExactSolution) {
+      log(`Phase ${phaseNum}: Found exact solution! Stopping.`);
+      break;
+    }
+
+    // Prepare for next phase: use top results as new initial states
+    // Preserve phase information for proper tracking
+    currentStates = extendedPhase.results.map(result => {
+      // Get the last phase sequence (for compatibility)
+      const lastPhaseSeq = result.phaseSeqs[result.phaseSeqs.length - 1];
+      return {
+        seq: lastPhaseSeq, // Last phase sequence for compatibility
+        board: result.finalBoard,
+        phaseSeqs: result.phaseSeqs, // Full phase sequences
+        phaseBoards: result.phaseBoards, // Full phase boards
+      };
+    });
+
+    // Check if we should continue (only if best improved)
+    if (phaseNum > 2) {
+      const prevBest = allPhases[allPhases.length - 2].topResults[0];
+      const prevRemaining = prevBest.remaining;
+      if (phaseBest.remaining >= prevRemaining) {
+        log(`Phase ${phaseNum}: No improvement (${phaseBest.remaining} >= ${prevRemaining}), stopping`);
+        break;
+      }
+    }
+  }
+
+  return {
+    bestSolution: bestSolution,
+    allPhases: allPhases,
+    totalStatesExplored: totalStatesExplored,
+  };
+}
+
 // Export for Node.js
 if (typeof module !== "undefined" && module.exports) {
   module.exports = {
@@ -334,6 +561,8 @@ if (typeof module !== "undefined" && module.exports) {
     groupMovesForDisplay,
     formatMove,
     printBoard,
+    solveExtendedPhase,
+    solveMultiPhase,
   };
 }
 
