@@ -198,71 +198,114 @@ function isMoveValidOnBoard(board, move) {
 }
 
 function groupMovesForDisplay(startBoard, moves) {
-  // Step 1: split into macro groups at row-removal boundaries
-  const macroGroups = [];
-  let currentBoard = startBoard;
-  let currentMacro = [];
-  let macroStartBoard = startBoard;
-
-  for (const move of moves) {
-    const prevLen = currentBoard.length;
-    currentBoard = applyMove(currentBoard, move[0], move[1]);
-    currentMacro.push(move);
-    if (currentBoard.length < prevLen) {
-      macroGroups.push({ board: macroStartBoard, moves: currentMacro, hasRowRemoval: true });
-      macroStartBoard = currentBoard;
-      currentMacro = [];
+  // Step 1: Identify which moves trigger row removals
+  // Apply moves one by one and mark which ones cause row removals
+  const rowRemovalMoves = new Set();
+  let testBoard = startBoard;
+  
+  for (let i = 0; i < moves.length; i++) {
+    const move = moves[i];
+    const prevLen = testBoard.length;
+    testBoard = applyMove(testBoard, move[0], move[1]);
+    if (testBoard.length < prevLen) {
+      rowRemovalMoves.add(i);
     }
   }
-  if (currentMacro.length) {
-    macroGroups.push({ board: macroStartBoard, moves: currentMacro, hasRowRemoval: false });
-  }
 
-  // Step 2: within each macro group, sub-group by independence
+  // Step 2: Split moves into segments between row removals
+  // Each row-removal move becomes its own step
+  // Non-removal moves between removals are grouped together
   const result = [];
-  for (const mg of macroGroups) {
-    let current = mg.board;
-    let remaining = mg.moves.slice();
+  let currentBoard = startBoard;
+  let segmentStart = 0;
 
-    while (remaining.length) {
-      const subgroup = [], deferred = [];
-      for (const mv of remaining) {
-        if (isMoveValidOnBoard(current, mv)) subgroup.push(mv);
-        else deferred.push(mv);
-      }
-      
-      // If no moves are valid, we still need to process them
-      // This can happen if moves depend on row removals that haven't happened yet
-      // In this case, apply the first deferred move anyway (it should become valid)
-      if (!subgroup.length && deferred.length > 0) {
-        // Take the first deferred move - it should become valid after row removal
-        subgroup.push(deferred[0]);
-        deferred.shift();
-      }
-      
-      if (!subgroup.length) break;
+  for (let i = 0; i <= moves.length; i++) {
+    const isRowRemoval = rowRemovalMoves.has(i);
+    const isLast = i === moves.length;
 
-      let nextBoard = current;
-      for (const mv of subgroup) nextBoard = applyMove(nextBoard, mv[0], mv[1]);
+    if (isRowRemoval || isLast) {
+      // Process segment from segmentStart to i
+      if (i > segmentStart) {
+        const segmentMoves = moves.slice(segmentStart, i);
+        
+        // Group non-removal moves by independence
+        let remaining = segmentMoves;
+        let segmentBoard = currentBoard;
 
-      let rowRemovalIdx = -1;
-      if (!deferred.length && mg.hasRowRemoval) {
-        for (let k = subgroup.length - 1; k >= 0; k--) {
-          let testBoard = current;
-          for (let m = 0; m < subgroup.length; m++) {
-            if (m !== k) testBoard = applyMove(testBoard, subgroup[m][0], subgroup[m][1]);
+        while (remaining.length) {
+          const subgroup = [];
+          const deferred = [];
+
+          // Find all moves valid on current board
+          for (const mv of remaining) {
+            if (isMoveValidOnBoard(segmentBoard, mv)) {
+              subgroup.push(mv);
+            } else {
+              deferred.push(mv);
+            }
           }
-          const before = testBoard.length;
-          const after = applyMove(testBoard, subgroup[k][0], subgroup[k][1]);
-          if (after.length < before) { rowRemovalIdx = k; break; }
+
+          if (subgroup.length === 0) {
+            // No valid moves - process first deferred move anyway
+            // (it should become valid as we apply moves sequentially)
+            if (deferred.length > 0) {
+              subgroup.push(deferred[0]);
+              deferred.shift();
+            } else {
+              break;
+            }
+          }
+
+          // Apply subgroup moves
+          let nextBoard = segmentBoard;
+          for (const mv of subgroup) {
+            nextBoard = applyMove(nextBoard, mv[0], mv[1]);
+          }
+
+          // // After applying, check if deferred moves are now valid
+          // if (nextBoard.length === segmentBoard.length && deferred.length > 0) {
+          //   const newlyValid = [];
+          //   const stillDeferred = [];
+          //   for (const mv of deferred) {
+          //     if (isMoveValidOnBoard(nextBoard, mv)) {
+          //       newlyValid.push(mv);
+          //     } else {
+          //       stillDeferred.push(mv);
+          //     }
+          //   }
+          //   if (newlyValid.length > 0) {
+          //     subgroup.push(...newlyValid);
+          //     for (const mv of newlyValid) {
+          //       nextBoard = applyMove(nextBoard, mv[0], mv[1]);
+          //     }
+          //     remaining = stillDeferred;
+          //   } else {
+          //     remaining = deferred;
+          //   }
+          // } else {
+          //   remaining = deferred;
+          // }
+
+          // Add subgroup as a step (no row removal)
+          result.push({ board: segmentBoard, moves: subgroup, rowRemovalIdx: -1 });
+          segmentBoard = nextBoard;
+          remaining = deferred;
         }
+
+        currentBoard = segmentBoard;
       }
 
-      result.push({ board: current, moves: subgroup, rowRemovalIdx });
-      current = nextBoard;
-      remaining = deferred;
+      // If this is a row-removal move, add it as its own step
+      if (isRowRemoval) {
+        const move = moves[i];
+        result.push({ board: currentBoard, moves: [move], rowRemovalIdx: 0 });
+        currentBoard = applyMove(currentBoard, move[0], move[1]);
+      }
+
+      segmentStart = i + 1;
     }
   }
+
   return result;
 }
 
