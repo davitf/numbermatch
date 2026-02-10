@@ -146,7 +146,21 @@ function solve(board, topK = 5) {
       return;
     }
 
-    for (const move of moves) {
+    // Prioritize moves that don't cause row removals
+    const sortedMoves = moves.slice().sort((moveA, moveB) => {
+      const boardA = applyMove(curBoard, moveA[0], moveA[1]);
+      const boardB = applyMove(curBoard, moveB[0], moveB[1]);
+      const causesRemovalA = boardA.length < curBoard.length;
+      const causesRemovalB = boardB.length < curBoard.length;
+      
+      // Moves that don't cause removal come first
+      if (causesRemovalA !== causesRemovalB) {
+        return causesRemovalA ? 1 : -1;
+      }
+      return 0; // Keep original order for moves of same type
+    });
+
+    for (const move of sortedMoves) {
       if (solved) return;
       const newBoard = applyMove(curBoard, move[0], move[1]);
       curSeq.push(move);
@@ -261,30 +275,6 @@ function groupMovesForDisplay(startBoard, moves) {
           for (const mv of subgroup) {
             nextBoard = applyMove(nextBoard, mv[0], mv[1]);
           }
-
-          // // After applying, check if deferred moves are now valid
-          // if (nextBoard.length === segmentBoard.length && deferred.length > 0) {
-          //   const newlyValid = [];
-          //   const stillDeferred = [];
-          //   for (const mv of deferred) {
-          //     if (isMoveValidOnBoard(nextBoard, mv)) {
-          //       newlyValid.push(mv);
-          //     } else {
-          //       stillDeferred.push(mv);
-          //     }
-          //   }
-          //   if (newlyValid.length > 0) {
-          //     subgroup.push(...newlyValid);
-          //     for (const mv of newlyValid) {
-          //       nextBoard = applyMove(nextBoard, mv[0], mv[1]);
-          //     }
-          //     remaining = stillDeferred;
-          //   } else {
-          //     remaining = deferred;
-          //   }
-          // } else {
-          //   remaining = deferred;
-          // }
 
           // Add subgroup as a step (no row removal)
           result.push({ board: segmentBoard, moves: subgroup, rowRemovalIdx: -1 });
