@@ -154,7 +154,8 @@ function boardToSvg(board, moves, highlightIdx) {
   const highlighted = new Set();
   for (const [mi, mj] of moves) { highlighted.add(mi); highlighted.add(mj); }
 
-  let svg = `<svg width="${w}" height="${h}" xmlns="http://www.w3.org/2000/svg" style="display:block">`;
+  let svg = `<svg viewBox="0 0 ${w} ${h}" xmlns="http://www.w3.org/2000/svg" ` +
+            `style="display:block;max-width:100%;height:auto;margin:0 auto">`;
 
   for (let idx = 0; idx < board.length; idx++) {
     const [r, c] = getRowCol(idx);
@@ -280,6 +281,8 @@ function runFullSolve(statusEl, resultsEl) {
   // Use multi-phase solver
   const result = solveMultiPhase(board, 5, 100, (msg) => {
     statusEl.textContent = msg;
+    // Also log to console (non-verbose output)
+    console.log(msg);
   });
 
   const elapsed = ((performance.now() - t0) / 1000).toFixed(1);

@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 // Test script for solver with detailed logging
-// Usage: node test-solver.js [board-string]
+// Usage: node test-solver.js [board-string] [--verbose]
 
 const fs = require("fs");
 const {
@@ -18,7 +18,16 @@ const {
   solveMultiPhase,
 } = require("./solver.js");
 
-function printSolutionWithRowRemovals(initialBoard, sequence, phaseLabel) {
+function printSolutionWithRowRemovals(initialBoard, sequence, phaseLabel, verbose = false) {
+  if (!verbose) {
+    // Non-verbose: just return the final board
+    let currentBoard = initialBoard;
+    for (const move of sequence) {
+      currentBoard = applyMove(currentBoard, move[0], move[1]);
+    }
+    return currentBoard;
+  }
+
   console.log(`\n${"=".repeat(60)}`);
   console.log(`${phaseLabel}`);
   console.log(`${"=".repeat(60)}\n`);
@@ -64,33 +73,34 @@ function printSolutionWithRowRemovals(initialBoard, sequence, phaseLabel) {
   return currentBoard;
 }
 
-function printGroupedSteps(initialBoard, sequence, phaseLabel) {
-  console.log(`\n${"=".repeat(60)}`);
-  console.log(`${phaseLabel} - GROUPED STEPS`);
-  console.log(`${"=".repeat(60)}\n`);
-
-  // Debug: Show macro groups first
-  console.log("DEBUG: Macro Groups (before sub-grouping):\n");
-  let debugBoard = initialBoard;
-  let debugMacroNum = 0;
-  let debugMoveIdx = 0;
-  
-  for (const move of sequence) {
-    const prevLen = debugBoard.length;
-    debugBoard = applyMove(debugBoard, move[0], move[1]);
-    debugMoveIdx++;
-    
-    if (debugBoard.length < prevLen) {
-      debugMacroNum++;
-      console.log(`  Macro Group ${debugMacroNum} ends at move ${debugMoveIdx} (row removal)`);
-    }
-  }
-  console.log();
-
+function printGroupedSteps(initialBoard, sequence, phaseLabel, verbose = false) {
   const groups = groupMovesForDisplay(initialBoard, sequence);
   let stepNum = 0;
-  let currentBoard = initialBoard;
   let totalMovesShown = 0;
+
+  if (verbose) {
+    console.log(`\n${"=".repeat(60)}`);
+    console.log(`${phaseLabel} - GROUPED STEPS`);
+    console.log(`${"=".repeat(60)}\n`);
+
+    // Debug: Show macro groups first
+    console.log("DEBUG: Macro Groups (before sub-grouping):\n");
+    let debugBoard = initialBoard;
+    let debugMacroNum = 0;
+    let debugMoveIdx = 0;
+    
+    for (const move of sequence) {
+      const prevLen = debugBoard.length;
+      debugBoard = applyMove(debugBoard, move[0], move[1]);
+      debugMoveIdx++;
+      
+      if (debugBoard.length < prevLen) {
+        debugMacroNum++;
+        console.log(`  Macro Group ${debugMacroNum} ends at move ${debugMoveIdx} (row removal)`);
+      }
+    }
+    console.log();
+  }
 
   for (const group of groups) {
     stepNum++;
@@ -98,8 +108,12 @@ function printGroupedSteps(initialBoard, sequence, phaseLabel) {
     const hasRowRemoval = rowRemovalIdx >= 0;
 
     console.log(`Step ${stepNum}: ${groupMoves.length} move(s)${hasRowRemoval ? " [ROW REMOVAL]" : ""}`);
-    console.log(`  Board at start of step:`);
-    printBoard(groupBoard);
+    
+    if (verbose) {
+      console.log(`  Board at start of step:`);
+      printBoard(groupBoard);
+    }
+    
     console.log(`  Moves in this step:`);
 
     // Verify each move is valid on the current board
@@ -112,11 +126,11 @@ function printGroupedSteps(initialBoard, sequence, phaseLabel) {
       const isValid = isMoveValidOnBoard(groupBoard, move);
       const isHighlighted = m === rowRemovalIdx;
       const marker = isHighlighted ? " ⚠️ [TRIGGERS ROW REMOVAL]" : "";
-      const validMarker = isValid ? "✓" : "✗ INVALID!";
+      const validMarker = verbose && !isValid ? "✗ INVALID!" : "✓";
 
       console.log(`    ${validMarker} Move ${m + 1}: ${vi}(${ri},${ci}) <-> ${vj}(${rj},${cj})${marker}`);
 
-      if (!isValid) {
+      if (verbose && !isValid) {
         console.log(`      ERROR: This move is not valid on the board at this step!`);
       }
     }
@@ -126,25 +140,26 @@ function printGroupedSteps(initialBoard, sequence, phaseLabel) {
     for (const move of groupMoves) {
       const prevLen = afterBoard.length;
       afterBoard = applyMove(afterBoard, move[0], move[1]);
-      if (afterBoard.length < prevLen) {
+      if (verbose && afterBoard.length < prevLen) {
         const rowsRemoved = (prevLen - afterBoard.length) / 9;
         console.log(`    → Row removal detected: ${rowsRemoved} row(s) removed`);
       }
     }
 
-    console.log(`  Board after step:`);
-    printBoard(afterBoard);
+    if (verbose) {
+      console.log(`  Board after step:`);
+      printBoard(afterBoard);
+    }
     console.log(`  Remaining: ${remainingCount(afterBoard)} cells\n`);
 
     totalMovesShown += groupMoves.length;
-    currentBoard = afterBoard;
   }
 
-  console.log(`\nGrouping Summary:`);
+  console.log(`Grouping Summary:`);
   console.log(`  Total steps: ${groups.length}`);
   console.log(`  Total moves in sequence: ${sequence.length}`);
   console.log(`  Total moves shown in steps: ${totalMovesShown}`);
-  if (totalMovesShown !== sequence.length) {
+  if (verbose && totalMovesShown !== sequence.length) {
     console.log(`  ⚠️  WARNING: ${sequence.length - totalMovesShown} move(s) missing!`);
     console.log(`  Missing moves:`);
     let shownSet = new Set();
@@ -165,19 +180,29 @@ function printGroupedSteps(initialBoard, sequence, phaseLabel) {
   }
   const stepsWithRemoval = groups.filter(g => g.rowRemovalIdx >= 0).length;
   console.log(`  Steps with row removal: ${stepsWithRemoval}`);
-  console.log();
+  if (verbose) {
+    console.log();
+  }
 }
 
 function main() {
   let boardStr;
+  let verbose = false;
 
-  if (process.argv[2]) {
+  // Check for verbose flag
+  const args = process.argv.slice(2);
+  if (args.includes("--verbose") || args.includes("-v")) {
+    verbose = true;
+    args.splice(args.indexOf("--verbose") >= 0 ? args.indexOf("--verbose") : args.indexOf("-v"), 1);
+  }
+
+  if (args[0]) {
     // Read from file or use as direct input
-    if (fs.existsSync(process.argv[2])) {
-      boardStr = fs.readFileSync(process.argv[2], "utf-8");
+    if (fs.existsSync(args[0])) {
+      boardStr = fs.readFileSync(args[0], "utf-8");
     } else {
       // Treat as direct board string (newlines separated by spaces or \n)
-      boardStr = process.argv[2].replace(/\\n/g, "\n");
+      boardStr = args[0].replace(/\\n/g, "\n");
     }
   } else {
     // Default test board
@@ -197,6 +222,7 @@ function main() {
   // Use multi-phase solver
   console.log("=== MULTI-PHASE SOLVER ===");
   const result = solveMultiPhase(board, 5, 100, (msg) => {
+    // Always log progress messages
     console.log(msg);
   });
 
@@ -234,14 +260,15 @@ function main() {
     const phaseEndBoard = printSolutionWithRowRemovals(
       phaseStartBoard,
       phaseSeq,
-      phaseLabel
+      phaseLabel,
+      verbose
     );
 
-    // Print grouped steps
-    printGroupedSteps(phaseStartBoard, phaseSeq, `PHASE ${phaseIdx + 1}`);
+    // Print grouped steps (always show, but skip boards if not verbose)
+    printGroupedSteps(phaseStartBoard, phaseSeq, `PHASE ${phaseIdx + 1}`, verbose);
 
     // If not last phase, show extended board (which is the next phase's starting board)
-    if (phaseIdx < bestSolution.phaseSeqs.length - 1) {
+    if (verbose && phaseIdx < bestSolution.phaseSeqs.length - 1) {
       const nextPhaseBoard = bestSolution.phaseBoards[phaseIdx + 1];
       console.log("\n[Board extended for next phase]");
       printBoard(nextPhaseBoard);

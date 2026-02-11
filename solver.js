@@ -108,19 +108,55 @@ function remainingCount(board) {
 function boardKey(board) { return board.join(","); }
 
 // ─── Solver ──────────────────────────────────────────────────────────────────
-function solve(board, topK = 20) {
+function solve(board, topK = 20, progressCallback = null) {
   const visited = new Set();
   const topResults = []; // [{seq:[...], board:[...]}]
   let maxTopRemaining = Infinity;
   let statesExplored = 0;
+  let statesSkipped = 0; // Track how many states we skip due to already being visited
   let solved = false;
+  let lastProgressTime = Date.now();
+  const PROGRESS_INTERVAL = 2000; // Print progress every 2 seconds
+  
+  // Track move progress at each depth level
+  const moveProgress = []; // Array of {total: number, current: number} for each depth
 
   function dfs(curBoard, curSeq) {
     if (solved) return;
     const key = boardKey(curBoard);
-    if (visited.has(key)) return;
+    if (visited.has(key)) {
+      statesSkipped++;
+      return;
+    }
     visited.add(key);
     statesExplored++;
+    
+    const depth = curSeq.length;
+    
+    // Periodic progress updates
+    if (progressCallback && Date.now() - lastProgressTime > PROGRESS_INTERVAL) {
+      const curRemaining = remainingCount(curBoard);
+      const bestRemaining = topResults.length > 0 ? remainingCount(topResults[0].board) : Infinity;
+      
+      // Build move progress string for first 10 moves
+      let moveProgressStr = "";
+      if (moveProgress.length > 0) {
+        const progressParts = [];
+        for (let i = 0; i < Math.min(moveProgress.length, 10); i++) {
+          const mp = moveProgress[i];
+          if (mp) {
+            progressParts.push(`${i + 1}: ${mp.current}/${mp.total}`);
+          }
+        }
+        if (progressParts.length > 0) {
+          moveProgressStr = ` (moves: ${progressParts.join(", ")})`;
+        }
+      }
+      
+      const skipRatio = statesSkipped > 0 ? `, skipped: ${statesSkipped} (${((statesSkipped / (statesExplored + statesSkipped)) * 100).toFixed(1)}%)` : "";
+      progressCallback(`  Explored ${statesExplored} states${skipRatio}, best: ${bestRemaining} remaining, current: ${curRemaining} remaining, depth: ${depth}${moveProgressStr}`);
+      lastProgressTime = Date.now();
+    }
 
     const moves = findAllMoves(curBoard);
     if (moves.length === 0) {
@@ -143,6 +179,10 @@ function solve(board, topK = 20) {
           ? remainingCount(topResults[topResults.length - 1].board) : Infinity;
         if (curRemaining === 0) solved = true;
       }
+      // Clear move progress for this depth when backtracking
+      if (moveProgress.length > depth) {
+        moveProgress.length = depth;
+      }
       return;
     }
 
@@ -160,17 +200,39 @@ function solve(board, topK = 20) {
       return 0; // Keep original order for moves of same type
     });
 
-    for (const move of sortedMoves) {
+    // Initialize or update move progress for this depth
+    if (!moveProgress[depth]) {
+      moveProgress[depth] = { total: sortedMoves.length, current: 0 };
+    } else {
+      moveProgress[depth].total = sortedMoves.length;
+    }
+
+    for (let moveIdx = 0; moveIdx < sortedMoves.length; moveIdx++) {
       if (solved) return;
+      
+      // Update current move index for this depth
+      moveProgress[depth].current = moveIdx + 1;
+      
+      const move = sortedMoves[moveIdx];
       const newBoard = applyMove(curBoard, move[0], move[1]);
       curSeq.push(move);
       dfs(newBoard, curSeq);
       curSeq.pop();
     }
+    
+    // Clear move progress for this depth when backtracking
+    if (moveProgress.length > depth) {
+      moveProgress.length = depth;
+    }
   }
 
   dfs(board, []);
-  return { results: topResults, states: statesExplored };
+  return { 
+    results: topResults, 
+    states: statesExplored,
+    statesSkipped: statesSkipped,
+    uniqueStates: visited.size
+  };
 }
 
 // ─── Display helpers ─────────────────────────────────────────────────────────
@@ -348,7 +410,7 @@ function solveExtendedPhase(initialStates, topN, topK, logCallback) {
     log(`  Extended board: ${extendedRemaining} cells`);
 
     // Solve extended board
-    const solveResult = solve(extended, topN);
+    const solveResult = solve(extended, topN, (msg) => log(`  ${msg}`));
     totalStatesExplored += solveResult.states;
 
     if (solveResult.results.length === 0) {
@@ -430,7 +492,9 @@ function solveMultiPhase(initialBoard, maxExtensions = 5, topK = 100, logCallbac
 
   // Phase 1: Solve initial board
   log(`Phase 1: Solving initial board...`);
-  const phase1 = solve(initialBoard, topK);
+  const phase1 = solve(initialBoard, topK, (msg) => {
+    if (logCallback) log(msg);
+  });
   totalStatesExplored += phase1.states;
   
   if (phase1.results.length === 0) {
