@@ -1,541 +1,499 @@
-// Image processing for screenshot board extraction
-// Works in both browser and Node.js (with canvas library)
+// image-processor.js
+// Browser-first screenshot board extractor using OpenCV.js + Tesseract.js
+//
+// Public API (compatible with your old version):
+//   async processScreenshot(imageSrc, statusCallback) -> string
+//
+// Expectations:
+// - window.cv is available (opencv.js loaded)
+// - window.Tesseract is available (tesseract.js loaded)
+// - screenshot-only; board is always 9 cells wide
 
 "use strict";
 
-const DEBUG = typeof window === "undefined" || window.location.search.includes("debug=1");
+const DEBUG =
+  (typeof window !== "undefined" && window.location && window.location.search.includes("debug=1")) ||
+  (typeof window === "undefined");
 
-function log(...args) {
-  if (DEBUG) console.log("[ImageProcessor]", ...args);
+function dbg(...args) {
+  if (DEBUG && typeof console !== "undefined") console.log("[ImageProcessor]", ...args);
 }
+
+function noop() {}
+
+const DEFAULTS = {
+  cols: 9,
+  marginPx: 3,          // ROI inset margin inside each cell
+  usedMeanThreshold: 140,
+  hasDigitInkThreshold: 20,
+  maxTrailingEmptyRowsAfterSeen: 3,
+  ocr: {
+    lang: "eng",
+    whitelist: "123456789",
+    psm: "13",          // critical
+    // If OCR returns null, try psm10 once as fallback:
+    fallbackPSM: "10",
+    // Optional confidence threshold to trigger fallback; set null to always fallback only on null
+    fallbackConfBelow: null, // e.g. 70
+    // Freeze canvas to PNG before recognize (prevents mutation/timing issues)
+    freezeToDataURL: true,
+  },
+};
+
+// -------------------- Public entry point --------------------
 
 async function processScreenshot(imageSrc, statusCallback) {
-  const updateStatus = statusCallback || (() => {});
-  
-  // Load image to canvas
-  updateStatus("Loading image...");
-  const img = await loadImage(imageSrc);
-  const canvas = createCanvas(img.width, img.height);
-  const ctx = canvas.getContext("2d");
-  ctx.drawImage(img, 0, 0);
+  const update = statusCallback || noop;
 
-  log("Image loaded:", img.width, "x", img.height);
-
-  // Detect board boundaries
-  updateStatus("Detecting board boundaries...");
-  const boardBounds = detectBoardBoundaries(canvas, ctx);
-  if (!boardBounds) {
-    log("Board detection failed");
-    throw new Error("Could not detect board boundaries");
+  if (typeof window === "undefined") {
+    // You can keep this as a hard error so failures are obvious.
+    throw new Error(
+      "This image-processor.js uses OpenCV.js and Tesseract.js (browser). " +
+      "Node execution requires an OpenCV build for Node."
+    );
   }
-  log("Board bounds:", boardBounds);
+  if (!window.cv || !cv.Mat) throw new Error("OpenCV.js not loaded (window.cv missing).");
+  if (!window.Tesseract) throw new Error("Tesseract.js not loaded (window.Tesseract missing).");
 
-  // Detect grid
-  updateStatus("Detecting grid...");
-  const grid = detectGrid(canvas, ctx, boardBounds);
-  if (!grid) {
-    log("Grid detection failed");
-    log("  hLines found:", boardBounds.hLines?.length || 0);
-    log("  vLines found:", boardBounds.vLines?.length || 0);
-    throw new Error("Could not detect grid");
-  }
-  log("Grid detected:", grid);
+  update("Loading image...");
+  const img = await loadImageBrowser(imageSrc);
 
-  // Extract cells and classify
-  updateStatus("Extracting cells...");
-  const cells = extractCells(canvas, ctx, boardBounds, grid);
-  log("Extracted", cells.length, "cells");
+  const srcCanvas = document.createElement("canvas");
+  srcCanvas.width = img.naturalWidth || img.width;
+  srcCanvas.height = img.naturalHeight || img.height;
+  const sctx = srcCanvas.getContext("2d", { willReadFrequently: true });
+  sctx.drawImage(img, 0, 0);
 
-  // Run OCR on cells with digits
-  updateStatus("Reading digits (this may take a moment)...");
-  const board = await processCellsWithOCR(cells);
-
-  // Generate board string
-  return generateBoardString(board);
-}
-
-function loadImage(src) {
-  if (typeof window !== "undefined") {
-    // Browser
-    return new Promise((resolve, reject) => {
-      const img = new Image();
-      img.onload = () => resolve(img);
-      img.onerror = reject;
-      img.src = src;
-    });
-  } else {
-    // Node.js
-    const { loadImage } = require("canvas");
-    return loadImage(src);
-  }
-}
-
-function createCanvas(width, height) {
-  if (typeof window !== "undefined") {
-    // Browser
-    const canvas = document.createElement("canvas");
-    canvas.width = width;
-    canvas.height = height;
-    return canvas;
-  } else {
-    // Node.js
-    const { createCanvas } = require("canvas");
-    return createCanvas(width, height);
-  }
-}
-
-// Convert hex color to RGB
-function hexToRgb(hex) {
-  const result = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex);
-  return result ? {
-    r: parseInt(result[1], 16),
-    g: parseInt(result[2], 16),
-    b: parseInt(result[3], 16)
-  } : null;
-}
-
-// Check if a color matches (within tolerance)
-function colorMatches(r, g, b, targetR, targetG, targetB, tolerance = 10) {
-  return Math.abs(r - targetR) <= tolerance &&
-         Math.abs(g - targetG) <= tolerance &&
-         Math.abs(b - targetB) <= tolerance;
-}
-
-function detectBoardBoundaries(canvas, ctx) {
-  const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-  const data = imgData.data;
-  const width = canvas.width;
-  const height = canvas.height;
-
-  log("Image size:", width, "x", height);
-
-  // Outer border color: #a6afc2
-  const outerBorderColor = hexToRgb("#a6afc2");
-  log("Looking for outer border color:", outerBorderColor);
-
-  // Find the outer border to locate the grid
-  // The border is 6px thick, so we look for lines of this color
-  let gridTop = null;
-  let gridLeft = null;
-  let gridRight = null;
-
-  // Find top border (horizontal line of outer border color)
-  // Start from ~464px down (after header area)
-  const headerHeight = 464;
-  for (let y = headerHeight; y < Math.min(headerHeight + 100, height); y++) {
-    let matchingPixels = 0;
-    for (let x = 0; x < width; x++) {
-      const idx = (y * width + x) * 4;
-      const r = data[idx];
-      const g = data[idx + 1];
-      const b = data[idx + 2];
-      if (colorMatches(r, g, b, outerBorderColor.r, outerBorderColor.g, outerBorderColor.b, 15)) {
-        matchingPixels++;
-      }
-    }
-    // If we find a significant line of the border color, that's the top
-    if (matchingPixels > width * 0.3) {
-      gridTop = y;
-      log("Found top border at y =", gridTop);
-      break;
-    }
-  }
-
-  if (gridTop === null) {
-    log("Could not find top border, using header height estimate");
-    // Fallback: use header height estimate
-    gridTop = headerHeight;
-  }
-
-  // Find left and right borders (vertical lines)
-  // Account for ~33px white border on sides
-  const sideBorder = 33;
-  for (let x = sideBorder; x < width - sideBorder; x++) {
-    let leftMatching = 0;
-    let rightMatching = 0;
-    for (let y = gridTop; y < Math.min(gridTop + 50, height); y++) {
-      const idx = (y * width + x) * 4;
-      const r = data[idx];
-      const g = data[idx + 1];
-      const b = data[idx + 2];
-      if (colorMatches(r, g, b, outerBorderColor.r, outerBorderColor.g, outerBorderColor.b, 15)) {
-        leftMatching++;
-        rightMatching++;
-      }
-    }
-    if (gridLeft === null && leftMatching > 20) {
-      gridLeft = x;
-      log("Found left border at x =", gridLeft);
-    }
-    if (gridRight === null && rightMatching > 20 && x > width / 2) {
-      gridRight = x;
-      log("Found right border at x =", gridRight);
-      break;
-    }
-  }
-
-  // If we couldn't find borders, use estimates
-  if (gridLeft === null) gridLeft = sideBorder;
-  if (gridRight === null) gridRight = width - sideBorder;
-
-  // The grid area starts after the outer border (6px thick)
-  const borderThickness = 6;
-  const gridX = gridLeft + borderThickness;
-  const gridY = gridTop + borderThickness;
-  const gridWidth = (gridRight - gridLeft) - (2 * borderThickness);
-  const gridHeight = height - gridY; // No bottom border, extends to end
-
-  log("Grid area:", gridX, gridY, gridWidth, "x", gridHeight);
-
-  if (gridWidth < 100 || gridHeight < 100) {
-    log("Grid area too small");
-    return null;
-  }
-
-  return {
-    x: gridX,
-    y: gridY,
-    width: gridWidth,
-    height: gridHeight,
-  };
-}
-
-function detectGrid(canvas, ctx, bounds) {
-  const imgData = ctx.getImageData(bounds.x, bounds.y, bounds.width, bounds.height);
-  const data = imgData.data;
-  const width = bounds.width;
-  const height = bounds.height;
-
-  log("Analyzing grid in region:", width, "x", height);
-
-  // Inner grid line color: #e2e7ed, 3px thick
-  const innerLineColor = hexToRgb("#e2e7ed");
-  log("Looking for inner grid lines color:", innerLineColor);
-
-  // Find horizontal grid lines
-  const hLines = [];
-  for (let y = 0; y < height; y++) {
-    let matchingPixels = 0;
-    for (let x = 0; x < width; x++) {
-      const idx = (y * width + x) * 4;
-      const r = data[idx];
-      const g = data[idx + 1];
-      const b = data[idx + 2];
-      if (colorMatches(r, g, b, innerLineColor.r, innerLineColor.g, innerLineColor.b, 20)) {
-        matchingPixels++;
-      }
-    }
-    // If enough of the row matches the inner line color, it's a grid line
-    // Account for 3px thickness - check if line or nearby pixels match
-    if (matchingPixels > width * 0.4) {
-      hLines.push(y);
-    }
-  }
-
-  // Find vertical grid lines
-  const vLines = [];
-  for (let x = 0; x < width; x++) {
-    let matchingPixels = 0;
-    for (let y = 0; y < height; y++) {
-      const idx = (y * width + x) * 4;
-      const r = data[idx];
-      const g = data[idx + 1];
-      const b = data[idx + 2];
-      if (colorMatches(r, g, b, innerLineColor.r, innerLineColor.g, innerLineColor.b, 20)) {
-        matchingPixels++;
-      }
-    }
-    if (matchingPixels > height * 0.4) {
-      vLines.push(x);
-    }
-  }
-
-  log(`Found ${hLines.length} horizontal, ${vLines.length} vertical lines`);
-
-  // Store for debugging
-  bounds.hLines = hLines;
-  bounds.vLines = vLines;
-
-  if (hLines.length < 2 || vLines.length < 2) {
-    log("Not enough grid lines found");
-    return null;
-  }
-
-  // Filter lines (remove duplicates that are very close)
-  const filteredH = [hLines[0]];
-  for (let i = 1; i < hLines.length; i++) {
-    if (hLines[i] - filteredH[filteredH.length - 1] > 3) {
-      filteredH.push(hLines[i]);
-    }
-  }
-  const filteredV = [vLines[0]];
-  for (let i = 1; i < vLines.length; i++) {
-    if (vLines[i] - filteredV[filteredV.length - 1] > 3) {
-      filteredV.push(vLines[i]);
-    }
-  }
-
-  log("Filtered lines:", filteredH.length, "horizontal,", filteredV.length, "vertical");
-
-  if (filteredH.length < 2 || filteredV.length < 2) {
-    log("Not enough filtered grid lines");
-    return null;
-  }
-
-  // Calculate cell size from spacing between lines
-  const hSpacings = [];
-  for (let i = 1; i < filteredH.length; i++) {
-    hSpacings.push(filteredH[i] - filteredH[i - 1]);
-  }
-  const vSpacings = [];
-  for (let i = 1; i < filteredV.length; i++) {
-    vSpacings.push(filteredV[i] - filteredV[i - 1]);
-  }
-
-  log("Horizontal spacings:", hSpacings.slice(0, 10));
-  log("Vertical spacings:", vSpacings.slice(0, 10));
-
-  // Find most common spacing (cell size)
-  const cellHeight = findMostCommon(hSpacings);
-  const cellWidth = findMostCommon(vSpacings);
-
-  log("Cell size:", cellWidth, "x", cellHeight);
-
-  if (!cellHeight || !cellWidth || cellHeight < 10 || cellWidth < 10) {
-    log("Invalid cell size");
-    return null;
-  }
-
-  // Find first cell start (after first grid line)
-  const startY = filteredH[0] + 1;
-  const startX = filteredV[0] + 1;
-
-  // Estimate number of rows/cols
-  const rows = Math.floor((height - startY) / cellHeight);
-  const cols = Math.min(9, Math.floor((width - startX) / cellWidth));
-
-  log("Grid dimensions:", rows, "rows x", cols, "cols");
-
-  return {
-    cellWidth,
-    cellHeight,
-    startX,
-    startY,
-    rows,
-    cols,
-  };
-}
-
-function findMostCommon(arr) {
-  const counts = {};
-  for (const val of arr) {
-    const rounded = Math.round(val);
-    counts[rounded] = (counts[rounded] || 0) + 1;
-  }
-  let max = 0;
-  let result = null;
-  for (const [val, count] of Object.entries(counts)) {
-    if (count > max) {
-      max = count;
-      result = parseInt(val);
-    }
-  }
-  return result;
-}
-
-function extractCells(canvas, ctx, bounds, grid) {
-  const cells = [];
-  const cellCanvas = createCanvas(grid.cellWidth, grid.cellHeight);
-  const cellCtx = cellCanvas.getContext("2d");
-
-  for (let row = 0; row < grid.rows; row++) {
-    for (let col = 0; col < grid.cols; col++) {
-      const x = bounds.x + grid.startX + col * grid.cellWidth;
-      const y = bounds.y + grid.startY + row * grid.cellHeight;
-
-      // Extract cell image
-      cellCtx.clearRect(0, 0, cellCanvas.width, cellCanvas.height);
-      cellCtx.drawImage(
-        canvas,
-        x, y, grid.cellWidth, grid.cellHeight,
-        0, 0, grid.cellWidth, grid.cellHeight
-      );
-
-      const imgData = cellCtx.getImageData(0, 0, grid.cellWidth, grid.cellHeight);
-      const state = classifyCell(imgData);
-
-      cells.push({
-        row,
-        col,
-        imageData: cellCanvas.toDataURL ? cellCanvas.toDataURL() : null,
-        state,
-        canvas: cellCanvas,
-      });
-    }
-  }
-
-  return cells;
-}
-
-function classifyCell(imgData) {
-  const data = imgData.data;
-  const pixelCount = imgData.width * imgData.height;
-  let darkPixels = 0;
-  let greyPixels = 0;
-  let whitePixels = 0;
-
-  for (let i = 0; i < data.length; i += 4) {
-    const r = data[i];
-    const g = data[i + 1];
-    const b = data[i + 2];
-    const brightness = (r + g + b) / 3;
-
-    if (brightness < 100) {
-      darkPixels++; // Black digit
-    } else if (brightness >= 100 && brightness < 180) {
-      greyPixels++; // Grey digit
-    } else if (brightness >= 240) {
-      whitePixels++; // White background
-    }
-  }
-
-  const darkRatio = darkPixels / pixelCount;
-  const greyRatio = greyPixels / pixelCount;
-  const whiteRatio = whitePixels / pixelCount;
-
-  if (darkRatio > 0.05) {
-    return "active"; // Black digit (active cell)
-  } else if (greyRatio > 0.05) {
-    return "cleared"; // Grey digit (cleared cell)
-  } else {
-    return "empty"; // Empty cell
-  }
-}
-
-async function processCellsWithOCR(cells) {
-  const board = [];
-  const activeCells = cells.filter(c => c.state === "active" || c.state === "cleared");
-
-  log("Processing", activeCells.length, "cells with OCR");
-
-  // Initialize Tesseract worker
-  let Tesseract;
-  if (typeof window !== "undefined") {
-    Tesseract = window.Tesseract;
-  } else {
-    Tesseract = require("tesseract.js");
-  }
-
-  const worker = await Tesseract.createWorker("eng");
-  await worker.setParameters({
-    tessedit_char_whitelist: "0123456789",
-    tessedit_pageseg_mode: Tesseract.PSM.SINGLE_CHAR,
-  });
+  update("Reading image into OpenCV...");
+  const src = cv.imread(srcCanvas); // RGBA
+  const bgr = new cv.Mat();
+  cv.cvtColor(src, bgr, cv.COLOR_RGBA2BGR);
 
   try {
-    for (let i = 0; i < activeCells.length; i++) {
-      const cell = activeCells[i];
-      // Preprocess cell image for better OCR
-      const processedCanvas = preprocessCellImage(cell.canvas);
-      const { data: { text } } = await worker.recognize(processedCanvas);
-      const digit = text.trim();
-      if (digit >= "1" && digit <= "9") {
-        cell.digit = digit;
-      } else {
-        cell.digit = null;
-      }
-    }
+    update("Detecting grid lines...");
+    const { xLines, yLines } = detectGridLines(bgr);
+
+    const bestX = pickBestXLines(xLines, bgr.cols);
+    if (!bestX) throw new Error("Could not find 10 vertical grid lines (9 columns).");
+
+    const xSeq = bestX.win; // 10 lines
+    const cellSize = bestX.meanCell;
+
+    const ySeq = pickBestYSequence(yLines, cellSize, bgr.rows);
+    if (!ySeq) throw new Error("Could not find consistent horizontal grid lines.");
+
+    // Crop to board rect bounded by detected lines
+    const x0 = clampInt(Math.floor(xSeq[0]), 0, bgr.cols - 2);
+    const x1 = clampInt(Math.floor(xSeq[9]), 1, bgr.cols - 1);
+    const y0 = clampInt(Math.floor(ySeq[0]), 0, bgr.rows - 2);
+    const y1 = clampInt(Math.floor(ySeq[ySeq.length - 1]), 1, bgr.rows - 1);
+
+    const cropW = Math.max(2, x1 - x0);
+    const cropH = Math.max(2, y1 - y0);
+
+    update("Cropping board...");
+    const board = bgr.roi(new cv.Rect(x0, y0, cropW, cropH));
+    const xLocal = xSeq.map((x) => x - x0);
+    const yLocal = ySeq.map((y) => y - y0);
+
+    update("Initializing OCR...");
+    const worker = await getTesseractWorker(DEFAULTS.ocr.lang);
+
+    update("Extracting cells + OCR...");
+    const outRows = await extractAndOcr(board, xLocal, yLocal, worker, update);
+
+    return outRows.join("\n");
   } finally {
-    await worker.terminate();
+    bgr.delete();
+    src.delete();
+  }
+}
+
+// -------------------- Image loading (browser) --------------------
+
+function loadImageBrowser(src) {
+  // Supports: File/Blob, URL string, dataURL string
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => resolve(img);
+    img.onerror = reject;
+
+    if (src instanceof Blob) {
+      const url = URL.createObjectURL(src);
+      img.onload = () => {
+        URL.revokeObjectURL(url);
+        resolve(img);
+      };
+      img.onerror = (e) => {
+        URL.revokeObjectURL(url);
+        reject(e);
+      };
+      img.src = url;
+    } else {
+      img.src = String(src);
+    }
+  });
+}
+
+// -------------------- Grid detection (OpenCV morphology) --------------------
+
+function detectGridLines(bgrMat) {
+  const gray = new cv.Mat();
+  cv.cvtColor(bgrMat, gray, cv.COLOR_BGR2GRAY);
+
+  const bin = new cv.Mat();
+  cv.adaptiveThreshold(
+    gray,
+    bin,
+    255,
+    cv.ADAPTIVE_THRESH_MEAN_C,
+    cv.THRESH_BINARY_INV,
+    31,
+    8
+  );
+
+  const vertical = new cv.Mat();
+  const horizontal = new cv.Mat();
+  bin.copyTo(vertical);
+  bin.copyTo(horizontal);
+
+  const h = bin.rows, w = bin.cols;
+  const vertKernelLen = Math.max(18, Math.floor(h / 25));
+  const horzKernelLen = Math.max(18, Math.floor(w / 25));
+  const vertKernel = cv.getStructuringElement(cv.MORPH_RECT, new cv.Size(1, vertKernelLen));
+  const horzKernel = cv.getStructuringElement(cv.MORPH_RECT, new cv.Size(horzKernelLen, 1));
+
+  cv.erode(vertical, vertical, vertKernel);
+  cv.dilate(vertical, vertical, vertKernel);
+
+  cv.erode(horizontal, horizontal, horzKernel);
+  cv.dilate(horizontal, horizontal, horzKernel);
+
+  const vContours = new cv.MatVector();
+  const hContours = new cv.MatVector();
+  const hierarchy = new cv.Mat();
+
+  const xs = [];
+  cv.findContours(vertical, vContours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
+  for (let i = 0; i < vContours.size(); i++) {
+    const r = cv.boundingRect(vContours.get(i));
+    if (r.height > h * 0.45 && r.width < w * 0.15) xs.push(r.x + r.width / 2);
   }
 
-  // Build board array
-  const maxRow = Math.max(...cells.map(c => c.row));
-  for (let row = 0; row <= maxRow; row++) {
-    const rowCells = cells.filter(c => c.row === row).sort((a, b) => a.col - b.col);
-    for (const cell of rowCells) {
-      if (cell.state === "active" && cell.digit) {
-        board.push({ row, col: cell.col, value: cell.digit });
-      } else if (cell.state === "cleared") {
-        board.push({ row, col: cell.col, value: "." });
+  const ys = [];
+  cv.findContours(horizontal, hContours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
+  for (let i = 0; i < hContours.size(); i++) {
+    const r = cv.boundingRect(hContours.get(i));
+    if (r.width > w * 0.45 && r.height < h * 0.15) ys.push(r.y + r.height / 2);
+  }
+
+  xs.sort((a, b) => a - b);
+  ys.sort((a, b) => a - b);
+
+  const xLines = clusterPositions(xs, 6);
+  const yLines = clusterPositions(ys, 6);
+
+  gray.delete(); bin.delete();
+  vertical.delete(); horizontal.delete();
+  vContours.delete(); hContours.delete(); hierarchy.delete();
+  vertKernel.delete(); horzKernel.delete();
+
+  dbg("Grid lines:", { xLines: xLines.length, yLines: yLines.length });
+  return { xLines, yLines };
+}
+
+function clusterPositions(sortedVals, tol) {
+  const clusters = [];
+  for (const v of sortedVals) {
+    if (!clusters.length) { clusters.push([v]); continue; }
+    const last = clusters[clusters.length - 1];
+    const lastMean = last.reduce((a, b) => a + b, 0) / last.length;
+    if (Math.abs(v - lastMean) <= tol) last.push(v);
+    else clusters.push([v]);
+  }
+  return clusters.map((c) => Math.round(c.reduce((a, b) => a + b, 0) / c.length));
+}
+
+function pickBestXLines(xLines, imgW) {
+  if (xLines.length < 10) return null;
+  const xs = [...xLines].sort((a, b) => a - b);
+  let best = null;
+
+  for (let i = 0; i <= xs.length - 10; i++) {
+    const win = xs.slice(i, i + 10);
+    const gaps = [];
+    for (let k = 0; k < 9; k++) gaps.push(win[k + 1] - win[k]);
+
+    const mean = gaps.reduce((a, b) => a + b, 0) / gaps.length;
+    const var_ = gaps.reduce((a, b) => a + (b - mean) * (b - mean), 0) / gaps.length;
+    const std = Math.sqrt(var_);
+    const rel = std / Math.max(1, mean);
+
+    const penalty =
+      (mean < imgW * 0.02 ? 2.0 : 0.0) +
+      (mean > imgW * 0.25 ? 2.0 : 0.0);
+
+    const score = rel + penalty;
+    if (!best || score < best.score) best = { win, score, meanCell: mean };
+  }
+  return best;
+}
+
+function pickBestYSequence(yLines, cellSize, imgH) {
+  if (yLines.length < 3) return null;
+  const ys = [...yLines].sort((a, b) => a - b);
+  const tol = Math.max(6, cellSize * 0.35);
+
+  let bestSeq = null;
+
+  for (let start = 0; start < ys.length; start++) {
+    const seq = [ys[start]];
+    let cur = ys[start];
+
+    while (true) {
+      const target = cur + cellSize;
+
+      let bestIdx = -1;
+      let bestDist = Infinity;
+
+      for (let j = start + 1; j < ys.length; j++) {
+        if (ys[j] <= cur) continue;
+        const d = Math.abs(ys[j] - target);
+        if (d < bestDist) { bestDist = d; bestIdx = j; }
+        if (ys[j] - target > tol) break;
       }
-      // Empty cells are skipped (no entry)
+
+      if (bestIdx === -1 || bestDist > tol) break;
+
+      const next = ys[bestIdx];
+      if (next >= imgH - 2) break;
+
+      seq.push(next);
+      cur = next;
+    }
+
+    if (!bestSeq || seq.length > bestSeq.length) bestSeq = seq;
+  }
+
+  if (!bestSeq || bestSeq.length < 3) return null;
+  return bestSeq;
+}
+
+// -------------------- Per-cell classification + OCR --------------------
+
+async function extractAndOcr(boardBgr, xLocal, yLocal, worker, update) {
+  const cols = DEFAULTS.cols;
+  const rows = yLocal.length - 1;
+
+  const outRows = [];
+  let seenContent = false;
+  let emptyStreak = 0;
+
+  for (let r = 0; r < rows; r++) {
+    let rowStr = "";
+    let rowHasAny = false;
+
+    for (let c = 0; c < cols; c++) {
+      const margin = DEFAULTS.marginPx;
+
+      const cx0 = clampInt(Math.floor(xLocal[c] + margin), 0, boardBgr.cols - 1);
+      const cx1 = clampInt(Math.floor(xLocal[c + 1] - margin), 1, boardBgr.cols);
+      const cy0 = clampInt(Math.floor(yLocal[r] + margin), 0, boardBgr.rows - 1);
+      const cy1 = clampInt(Math.floor(yLocal[r + 1] - margin), 1, boardBgr.rows);
+
+      const cw = Math.max(1, cx1 - cx0);
+      const ch = Math.max(1, cy1 - cy0);
+
+      const roi = boardBgr.roi(new cv.Rect(cx0, cy0, cw, ch));
+      const cellGray = new cv.Mat();
+      cv.cvtColor(roi, cellGray, cv.COLOR_BGR2GRAY);
+
+      const usedInfo = classifyUsed(cellGray);
+
+      let chOut = " ";
+      if (!usedInfo.hasDigit) {
+        chOut = " ";
+      } else if (usedInfo.used) {
+        chOut = ".";
+        rowHasAny = true;
+      } else {
+        // active digit -> OCR
+        const { digit } = await ocrDigitFromGray64(worker, cellGray);
+        if (digit) {
+          chOut = digit;
+          rowHasAny = true;
+        } else {
+          // If it looks like a digit but OCR failed, still mark as space (so you can see failures)
+          chOut = " ";
+        }
+      }
+
+      rowStr += chOut;
+
+      roi.delete();
+      cellGray.delete();
+    }
+
+    // stopping heuristic: after we've seen content, stop after N empty rows
+    if (rowHasAny) {
+      seenContent = true;
+      emptyStreak = 0;
+    } else if (seenContent) {
+      emptyStreak++;
+      if (emptyStreak >= DEFAULTS.maxTrailingEmptyRowsAfterSeen) break;
+    }
+
+    const trimmedRight = rowStr.replace(/ +$/, "");
+    if (trimmedRight.length > 0) outRows.push(trimmedRight);
+    else if (seenContent) outRows.push("");
+  }
+
+  update("Done.");
+  return outRows;
+}
+
+function classifyUsed(cellGray) {
+  const bin = new cv.Mat();
+  cv.adaptiveThreshold(
+    cellGray,
+    bin,
+    255,
+    cv.ADAPTIVE_THRESH_MEAN_C,
+    cv.THRESH_BINARY_INV,
+    15,
+    6
+  );
+
+  const nonZero = cv.countNonZero(bin);
+  if (nonZero < DEFAULTS.hasDigitInkThreshold) {
+    bin.delete();
+    return { hasDigit: false, used: false, ink: nonZero, meanInk: null };
+  }
+
+  const mean = cv.mean(cellGray, bin)[0];
+  const used = mean > DEFAULTS.usedMeanThreshold;
+
+  bin.delete();
+  return { hasDigit: true, used, ink: nonZero, meanInk: mean };
+}
+
+function matGrayToCanvas(grayMat) {
+  const rgba = new cv.Mat();
+  cv.cvtColor(grayMat, rgba, cv.COLOR_GRAY2RGBA);
+  const canvas = document.createElement("canvas");
+  canvas.width = rgba.cols;
+  canvas.height = rgba.rows;
+  cv.imshow(canvas, rgba);
+  rgba.delete();
+  return canvas;
+}
+
+function prepareCandidate64(cellGray) {
+  // A1_gray_norm_64
+  const resized = new cv.Mat();
+  cv.resize(cellGray, resized, new cv.Size(64, 64), 0, 0, cv.INTER_AREA);
+
+  const norm = new cv.Mat();
+  cv.normalize(resized, norm, 0, 255, cv.NORM_MINMAX);
+
+  resized.delete();
+  const canvas = matGrayToCanvas(norm);
+  norm.delete();
+  return canvas;
+}
+
+async function ocrDigitFromGray64(worker, cellGray) {
+  const canvas = prepareCandidate64(cellGray);
+  try {
+    const r1 = await ocrWithParams(worker, canvas, DEFAULTS.ocr.psm);
+    if (r1.digit && (DEFAULTS.ocr.fallbackConfBelow == null || (r1.conf != null && r1.conf >= DEFAULTS.ocr.fallbackConfBelow))) {
+      return r1;
+    }
+
+    // Fallback: only if null or low confidence
+    if (!r1.digit || (DEFAULTS.ocr.fallbackConfBelow != null && (r1.conf == null || r1.conf < DEFAULTS.ocr.fallbackConfBelow))) {
+      const r2 = await ocrWithParams(worker, canvas, DEFAULTS.ocr.fallbackPSM);
+      // pick best (prefer non-null; then higher conf)
+      return pickBetterOCR(r1, r2);
+    }
+
+    return r1;
+  } finally {
+    // canvas is DOM object; GC handles
+  }
+}
+
+function pickBetterOCR(a, b) {
+  if (a.digit && !b.digit) return a;
+  if (!a.digit && b.digit) return b;
+  if (!a.digit && !b.digit) return a;
+  const ac = a.conf == null ? -1 : a.conf;
+  const bc = b.conf == null ? -1 : b.conf;
+  return (bc > ac) ? b : a;
+}
+
+// -------------------- Tesseract worker --------------------
+
+let _worker = null;
+
+async function getTesseractWorker(lang) {
+  if (_worker) return _worker;
+
+  const Tesseract = window.Tesseract;
+  dbg("Creating Tesseract worker...");
+  const w = await Tesseract.createWorker(lang);
+
+  // Set static params once (whitelist is re-set per call anyway, but harmless)
+  await w.setParameters({
+    tessedit_char_whitelist: DEFAULTS.ocr.whitelist,
+  });
+
+  _worker = w;
+  return _worker;
+}
+
+async function ocrWithParams(worker, canvas, psm) {
+  await worker.setParameters({
+    tessedit_char_whitelist: DEFAULTS.ocr.whitelist,
+    tessedit_pageseg_mode: String(psm),
+  });
+
+  const input = DEFAULTS.ocr.freezeToDataURL ? canvas.toDataURL("image/png") : canvas;
+  const { data } = await worker.recognize(input);
+
+  const txt = (data.text || "").trim().replace(/[^1-9]/g, "");
+  const digit = txt.length ? txt[0] : null;
+
+  // Best symbol confidence
+  let conf = null;
+  if (Array.isArray(data.symbols)) {
+    for (const s of data.symbols) {
+      const t = (s.text || "").replace(/[^1-9]/g, "");
+      if (!t) continue;
+      const c = typeof s.confidence === "number" ? s.confidence : null;
+      if (c != null && (conf == null || c > conf)) conf = c;
     }
   }
 
-  return board;
+  return { digit, conf };
 }
 
-function preprocessCellImage(canvas) {
-  // Create a larger canvas for better OCR accuracy
-  const scale = 4;
-  const newCanvas = createCanvas(canvas.width * scale, canvas.height * scale);
-  const ctx = newCanvas.getContext("2d");
+// -------------------- Helpers --------------------
 
-  // Draw scaled up with smoothing
-  ctx.imageSmoothingEnabled = false;
-  ctx.drawImage(canvas, 0, 0, newCanvas.width, newCanvas.height);
-
-  // Enhance contrast
-  const imgData = ctx.getImageData(0, 0, newCanvas.width, newCanvas.height);
-  const data = imgData.data;
-  for (let i = 0; i < data.length; i += 4) {
-    const r = data[i];
-    const g = data[i + 1];
-    const b = data[i + 2];
-    const brightness = (r + g + b) / 3;
-    
-    // Increase contrast: make dark darker, light lighter
-    const factor = 1.5;
-    const newBrightness = Math.max(0, Math.min(255, (brightness - 128) * factor + 128));
-    const ratio = newBrightness / (brightness || 1);
-    
-    data[i] = Math.max(0, Math.min(255, r * ratio));
-    data[i + 1] = Math.max(0, Math.min(255, g * ratio));
-    data[i + 2] = Math.max(0, Math.min(255, b * ratio));
-  }
-  ctx.putImageData(imgData, 0, 0);
-
-  return newCanvas;
+function clampInt(v, lo, hi) {
+  if (v < lo) return lo;
+  if (v > hi) return hi;
+  return v;
 }
 
-function generateBoardString(board) {
-  const maxRow = Math.max(...board.map(b => b.row));
-  const lines = [];
+// -------------------- Exports --------------------
 
-  for (let row = 0; row <= maxRow; row++) {
-    const rowCells = board.filter(b => b.row === row).sort((a, b) => a.col - b.col);
-    if (rowCells.length === 0) continue;
+const api = {
+  processScreenshot,
+};
 
-    let line = "";
-    let lastCol = -1;
-    for (const cell of rowCells) {
-      // Fill gaps with spaces (will be handled as empty in parseBoard)
-      while (lastCol < cell.col - 1) {
-        line += " ";
-        lastCol++;
-      }
-      line += cell.value;
-      lastCol = cell.col;
-    }
-    lines.push(line);
-  }
-
-  return lines.join("\n");
-}
-
-// Export for Node.js
 if (typeof module !== "undefined" && module.exports) {
-  module.exports = {
-    processScreenshot,
-    loadImage,
-    createCanvas,
-    detectBoardBoundaries,
-    detectGrid,
-    extractCells,
-    classifyCell,
-    processCellsWithOCR,
-    generateBoardString,
-  };
+  module.exports = api;
+} else {
+  window.ImageProcessor = api;
 }
-

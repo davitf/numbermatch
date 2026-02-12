@@ -33,7 +33,7 @@
   .btn:hover { background: #43A047; }
   .btn:disabled { background: #aaa; cursor: not-allowed; }
   .hint { font-size: 12px; color: #999; margin-top: 6px; }
-  .file-input-wrapper { margin-top: 12px; display: none; }
+  .file-input-wrapper { margin-top: 12px; }
   .file-input-wrapper input[type="file"] { display: none; }
   .file-input-label {
     display: inline-block; padding: 8px 16px; background: #E3F2FD;
@@ -74,6 +74,7 @@
     font-weight: 700; color: #2E7D32; font-size: 15px;
   }
 </style>
+<script async src="https://docs.opencv.org/4.x/opencv.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
 <script src="solver.js"></script>
 <script src="image-processor.js"></script>
@@ -256,13 +257,13 @@ function startSolve() {
   statusEl.textContent = "Solving phase 1...";
 
   setTimeout(() => {
-    try { 
+    try {
       runFullSolve(statusEl, resultsEl);
       btn.disabled = false;
     }
-    catch (e) { 
-      statusEl.textContent = "Error: " + e.message; 
-      console.error(e); 
+    catch (e) {
+      statusEl.textContent = "Error: " + e.message;
+      console.error(e);
       btn.disabled = false;
     }
   }, 50);
@@ -312,4 +313,3 @@ function runFullSolve(statusEl, resultsEl) {
 </script>
 </body>
 </html>
-
