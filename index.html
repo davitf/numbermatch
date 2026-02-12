@@ -173,8 +173,8 @@ function boardToSvg(board, moves, highlightIdx) {
 
     if (val > 0) {
       const fw = highlighted.has(idx) ? "bold" : "normal";
-      svg += `<text x="${x+CELL_SIZE/2}" y="${y+CELL_SIZE/2+7}" ` +
-             `text-anchor="middle" font-size="20" font-family="monospace" ` +
+      svg += `<text x="${x+CELL_SIZE/2}" y="${y+CELL_SIZE/2+11}" ` +
+             `text-anchor="middle" font-size="30" font-family="monospace" ` +
              `font-weight="${fw}" fill="#333">${val}</text>`;
     } else if (val === 0) {
       svg += `<text x="${x+CELL_SIZE/2}" y="${y+CELL_SIZE/2+5}" ` +
