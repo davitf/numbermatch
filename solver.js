@@ -273,24 +273,87 @@ function isMoveValidOnBoard(board, move) {
   return isValidPair(board, i, j) && hasClearPath(i, j, board);
 }
 
+function getRemovedRow(boardBefore, boardAfter, move) {
+  /**
+   * Determines which row was removed by a move.
+   * Returns the row number (0-indexed) or -1 if no row was removed.
+   */
+  const rowsBefore = boardBefore.length / ROW_SIZE;
+  const rowsAfter = boardAfter.length / ROW_SIZE;
+  if (rowsBefore === rowsAfter) return -1;
+  
+  // Create a board with the move applied (cells cleared but row not yet removed)
+  const tempBoard = boardBefore.slice();
+  tempBoard[move[0]] = 0;
+  tempBoard[move[1]] = 0;
+  
+  // Find which row is now completely empty (all zeros or -1s)
+  for (let r = 0; r < rowsBefore; r++) {
+    const start = r * ROW_SIZE;
+    const row = tempBoard.slice(start, start + ROW_SIZE);
+    if (!row.some(v => v > 0)) {
+      // This row is now empty, so it was removed
+      return r;
+    }
+  }
+  return -1;
+}
+
+function isDiagonalMove(move) {
+  /**
+   * Checks if a move is diagonal (not horizontal or vertical).
+   */
+  const [i, j] = move;
+  const [ri, ci] = getRowCol(i);
+  const [rj, cj] = getRowCol(j);
+  return ri !== rj && ci !== cj;
+}
+
+function diagonalCrossesRow(move, removedRow) {
+  /**
+   * Checks if a diagonal move crosses the removed row.
+   * Returns true if the move goes from above to below (or vice versa) the removed row
+   * without having either endpoint in that row.
+   */
+  const [i, j] = move;
+  const [ri, ci] = getRowCol(i);
+  const [rj, cj] = getRowCol(j);
+  
+  // If not diagonal, it doesn't cross
+  if (ri === rj || ci === cj) return false;
+  
+  // If either endpoint is in the removed row, it's fine
+  if (ri === removedRow || rj === removedRow) return false;
+  
+  // Check if the move crosses the removed row
+  const minRow = Math.min(ri, rj);
+  const maxRow = Math.max(ri, rj);
+  return minRow < removedRow && removedRow < maxRow;
+}
+
 function groupMovesForDisplay(startBoard, moves) {
-  // Step 1: Identify which moves trigger row removals
+  // Step 1: Identify which moves trigger row removals and which rows they remove
   // Apply moves one by one and mark which ones cause row removals
   const rowRemovalMoves = new Set();
+  const removedRowsByMove = new Map(); // move index -> removed row number
   let testBoard = startBoard;
   
   for (let i = 0; i < moves.length; i++) {
     const move = moves[i];
     const prevLen = testBoard.length;
+    const prevBoard = testBoard.slice();
     testBoard = applyMove(testBoard, move[0], move[1]);
     if (testBoard.length < prevLen) {
       rowRemovalMoves.add(i);
+      const removedRow = getRemovedRow(prevBoard, testBoard, move);
+      if (removedRow !== -1) {
+        removedRowsByMove.set(i, removedRow);
+      }
     }
   }
 
   // Step 2: Split moves into segments between row removals
-  // Each row-removal move becomes its own step
-  // Non-removal moves between removals are grouped together
+  // Try to merge row-removal moves with previous step if safe
   const result = [];
   let currentBoard = startBoard;
   let segmentStart = 0;
@@ -347,11 +410,43 @@ function groupMovesForDisplay(startBoard, moves) {
         currentBoard = segmentBoard;
       }
 
-      // If this is a row-removal move, add it as its own step
+      // If this is a row-removal move, try to merge it with the previous step
       if (isRowRemoval) {
         const move = moves[i];
-        result.push({ board: currentBoard, moves: [move], rowRemovalIdx: 0 });
-        currentBoard = applyMove(currentBoard, move[0], move[1]);
+        const removedRow = removedRowsByMove.get(i);
+        
+        // Check if we can merge with the previous step
+        let canMerge = false;
+        if (result.length > 0) {
+          const lastStep = result[result.length - 1];
+          
+          // Check 1: Can the move be applied to the board at the beginning of the last step?
+          if (isMoveValidOnBoard(lastStep.board, move)) {
+            // Check 2: No diagonal move in the last step crosses the removed row
+            canMerge = true;
+            if (removedRow !== undefined && removedRow !== -1) {
+              for (const mv of lastStep.moves) {
+                if (isDiagonalMove(mv) && diagonalCrossesRow(mv, removedRow)) {
+                  canMerge = false;
+                  break;
+                }
+              }
+            }
+          }
+        }
+        
+        if (canMerge) {
+          // Merge with previous step
+          const lastStep = result[result.length - 1];
+          lastStep.moves.push(move);
+          // Update rowRemovalIdx to point to the merged move
+          lastStep.rowRemovalIdx = lastStep.moves.length - 1;
+          currentBoard = applyMove(currentBoard, move[0], move[1]);
+        } else {
+          // Add as separate step
+          result.push({ board: currentBoard, moves: [move], rowRemovalIdx: 0 });
+          currentBoard = applyMove(currentBoard, move[0], move[1]);
+        }
       }
 
       segmentStart = i + 1;
