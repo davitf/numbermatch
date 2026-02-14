@@ -143,12 +143,21 @@ const LINE_COLORS = [
   "#7CB342","#039BE5","#C0CA33","#F4511E","#5E35B1",
 ];
 
-function boardToSvg(board, moves, highlightIdx) {
+function boardToSvg(board, moves, highlightIdx, removedRows) {
   if (!board || !board.length) {
     return '<div style="color:#4CAF50;font-weight:bold;padding:8px">Board cleared!</div>';
   }
   moves = moves || [];
   highlightIdx = highlightIdx ?? -1;
+  // removedRows can be a single number, an array, or undefined
+  const removedRowsSet = new Set();
+  if (removedRows !== undefined && removedRows !== null) {
+    if (Array.isArray(removedRows)) {
+      removedRows.forEach(r => { if (r >= 0) removedRowsSet.add(r); });
+    } else if (removedRows >= 0) {
+      removedRowsSet.add(removedRows);
+    }
+  }
 
   const nRows = board.length / ROW_SIZE;
   const w = ROW_SIZE * CELL_SIZE, h = nRows * CELL_SIZE;
@@ -167,25 +176,41 @@ function boardToSvg(board, moves, highlightIdx) {
     const [r, c] = getRowCol(idx);
     const x = c * CELL_SIZE, y = r * CELL_SIZE;
     const val = board[idx];
+    const isInRemovedRow = removedRowsSet.has(r);
+    const isHighlighted = cellToMoveIdx.has(idx);
     let fill, stroke, fillOpacity = 1;
-    if (cellToMoveIdx.has(idx)) {
+    
+    if (isHighlighted) {
       const moveIdx = cellToMoveIdx.get(idx);
       const lineColor = LINE_COLORS[moveIdx % LINE_COLORS.length];
       fill = lineColor;
       fillOpacity = 0.3; // Lower opacity for cell background
       stroke = lineColor; // Stroke uses same color but will be at full opacity
-    } else if (val > 0)              { fill = "#F5F5F5"; stroke = "#DDD"; }
-    else if (val === 0)            { fill = "#FAFAFA"; stroke = "#EEE"; }
-    else                           { fill = "#FFF";    stroke = "#F5F5F5"; }
+    } else if (val > 0) {
+      fill = "#F5F5F5";
+      stroke = "#DDD";
+    } else if (isInRemovedRow) {
+      // Cells in removed row that aren't highlighted - make them grayer
+      fill = "#E0E0E0";
+      stroke = "#C0C0C0";
+    } else if (val === 0) {
+      fill = "#FAFAFA";
+      stroke = "#EEE";
+    } else {
+      fill = "#FFF";
+      stroke = "#F5F5F5";
+    }
 
     svg += `<rect x="${x+2}" y="${y+2}" width="${CELL_SIZE-4}" height="${CELL_SIZE-4}" ` +
            `fill="${fill}" fill-opacity="${fillOpacity}" stroke="${stroke}" rx="4"/>`;
 
     if (val > 0) {
-      const fw = cellToMoveIdx.has(idx) ? "bold" : "normal";
+      const fw = isHighlighted ? "bold" : "normal";
+      // Make text slightly grayer if in removed row and not highlighted
+      const textColor = (isInRemovedRow && !isHighlighted) ? "#666" : "#333";
       svg += `<text x="${x+CELL_SIZE/2}" y="${y+CELL_SIZE/2+11}" ` +
              `text-anchor="middle" font-size="30" font-family="monospace" ` +
-             `font-weight="${fw}" fill="#333">${val}</text>`;
+             `font-weight="${fw}" fill="${textColor}">${val}</text>`;
     } else if (val === 0) {
       svg += `<text x="${x+CELL_SIZE/2}" y="${y+CELL_SIZE/2+5}" ` +
              `text-anchor="middle" font-size="16" fill="#CCC">\u00b7</text>`;
@@ -207,6 +232,32 @@ function boardToSvg(board, moves, highlightIdx) {
   return svg;
 }
 
+// ─── Helper function to calculate removed rows ────────────────────────────────
+function calculateRemovedRows(boardBefore, move) {
+  /**
+   * Determines which rows will be removed by a move.
+   * Returns an array of row numbers (0-indexed) that will be removed.
+   */
+  const rowsBefore = boardBefore.length / ROW_SIZE;
+  const removedRows = [];
+  
+  // Create a board with the move applied (cells cleared but rows not yet removed)
+  const tempBoard = boardBefore.slice();
+  tempBoard[move[0]] = 0;
+  tempBoard[move[1]] = 0;
+  
+  // Find all rows that are now completely empty (all zeros or -1s)
+  for (let r = 0; r < rowsBefore; r++) {
+    const start = r * ROW_SIZE;
+    const row = tempBoard.slice(start, start + ROW_SIZE);
+    if (!row.some(v => v > 0)) {
+      // This row is now empty, so it will be removed
+      removedRows.push(r);
+    }
+  }
+  return removedRows;
+}
+
 // ─── HTML generation ─────────────────────────────────────────────────────────
 function renderSolution(initialBoard, phases) {
   let html = "";
@@ -226,16 +277,26 @@ function renderSolution(initialBoard, phases) {
     for (const { board: gBoard, moves: gMoves, rowRemovalIdx } of groups) {
       stepCounter++;
       const rowsRemoved = rowRemovalIdx >= 0;
+      
+      // Calculate which rows are being removed
+      let removedRows = [];
+      if (rowsRemoved) {
+        const removalMove = gMoves[rowRemovalIdx];
+        removedRows = calculateRemovedRows(gBoard, removalMove);
+      }
+      
       const descs = gMoves.map(([mi, mj]) => {
         moveCounter++;
         return `<span class="move-item">${gBoard[mi]} \u2194 ${gBoard[mj]}</span>`;
       });
       const n = gMoves.length;
+      const rowText = rowsRemoved 
+        ? (removedRows.length > 1 ? ` (removes ${removedRows.length} rows)` : " (removes row)")
+        : "";
       html += `<div class="step">`;
-      html += `<div class="step-title">Step ${stepCounter}: ${n} move${n!==1?"s":""}` +
-              `${rowsRemoved ? " (removes row)" : ""}</div>`;
+      html += `<div class="step-title">Step ${stepCounter}: ${n} move${n!==1?"s":""}${rowText}</div>`;
       html += `<div class="move-list">${descs.join(" ")}</div>`;
-      html += boardToSvg(gBoard, gMoves, rowRemovalIdx);
+      html += boardToSvg(gBoard, gMoves, rowRemovalIdx, removedRows);
 
       if (rowsRemoved) {
         let temp = gBoard;
