@@ -302,18 +302,20 @@ function boardToSvg(board, moves, highlightIdx, removedRows) {
 }
 
 // ─── Helper function to calculate removed rows ────────────────────────────────
-function calculateRemovedRows(boardBefore, move) {
+function calculateRemovedRows(boardBefore, moves) {
   /**
-   * Determines which rows will be removed by a move.
+   * Determines which rows will be removed after applying all moves.
    * Returns an array of row numbers (0-indexed) that will be removed.
    */
   const rowsBefore = boardBefore.length / ROW_SIZE;
   const removedRows = [];
   
-  // Create a board with the move applied (cells cleared but rows not yet removed)
+  // Apply all moves to a copy (clearing cells but not removing rows)
   const tempBoard = boardBefore.slice();
-  tempBoard[move[0]] = 0;
-  tempBoard[move[1]] = 0;
+  for (const [mi, mj] of moves) {
+    tempBoard[mi] = 0;
+    tempBoard[mj] = 0;
+  }
   
   // Find all rows that are now completely empty (all zeros or -1s)
   for (let r = 0; r < rowsBefore; r++) {
@@ -360,8 +362,7 @@ function renderSolution(initialBoard, phases) {
       // Calculate which rows are being removed
       let removedRows = [];
       if (rowsRemoved) {
-        const removalMove = gMoves[rowRemovalIdx];
-        removedRows = calculateRemovedRows(gBoard, removalMove);
+        removedRows = calculateRemovedRows(gBoard, gMoves);
       }
       
       const descs = gMoves.map(([mi, mj]) => {
