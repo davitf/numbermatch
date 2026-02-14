@@ -515,8 +515,16 @@ function runFullSolve(statusEl, resultsEl) {
   html += renderSolution(board, phases);
   resultsEl.innerHTML = html;
   
-  // Scroll to the top of the results
-  resultsEl.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  // Scroll to the first step after rendering (smooth scroll)
+  setTimeout(() => {
+    if (window.allStepIds && window.allStepIds.length > 0) {
+      const firstStepId = window.allStepIds[0];
+      const firstStepEl = document.getElementById(firstStepId);
+      if (firstStepEl) {
+        firstStepEl.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      }
+    }
+  }, 0);
 }
 </script>
 </body>
