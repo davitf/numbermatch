@@ -74,9 +74,21 @@
 
   .step {
     background: #fff; border-radius: 8px; padding: 16px; margin: 16px 0;
-    box-shadow: 0 1px 3px rgba(0,0,0,.1);
+    box-shadow: 0 1px 3px rgba(0,0,0,.1); position: relative;
   }
   .step-title { font-weight: 700; margin-bottom: 4px; color: #444; }
+  .step-nav {
+    position: absolute; top: 16px; right: 16px; display: flex; gap: 8px;
+  }
+  .step-nav-btn {
+    background: #F5F5F5; border: 1px solid #DDD; border-radius: 4px;
+    padding: 4px 12px; font-size: 13px; font-weight: 600; cursor: pointer;
+    color: #555; transition: background .2s;
+  }
+  .step-nav-btn:hover { background: #E0E0E0; }
+  .step-nav-btn:disabled {
+    background: #F5F5F5; color: #BBB; cursor: not-allowed; opacity: 0.5;
+  }
   .move-list { font-size: 13px; color: #666; margin: 4px 0 12px; line-height: 1.7; }
   .move-item {
     display: inline-block; background: #F5F5F5; border-radius: 4px;
@@ -319,6 +331,7 @@ function calculateRemovedRows(boardBefore, move) {
 function renderSolution(initialBoard, phases) {
   let html = "";
   let moveCounter = 0, stepCounter = 0;
+  const allStepIds = [];
 
   for (let pi = 0; pi < phases.length; pi++) {
     const { label, startBoard, moves } = phases[pi];
@@ -326,13 +339,22 @@ function renderSolution(initialBoard, phases) {
 
     if (pi > 0) {
       html += `<div class="extend-banner">\u27f3 Board extended &mdash; remaining numbers duplicated</div>`;
-      html += `<div class="step"><div class="step-title">Extended board</div>${boardToSvg(startBoard)}</div>`;
+      const extendStepId = `step-extend-${pi}`;
+      allStepIds.push(extendStepId);
+      html += `<div class="step" id="${extendStepId}">`;
+      html += `<div class="step-nav">`;
+      html += `<button class="step-nav-btn" onclick="navigateStep('${extendStepId}', -1)">← Prev</button>`;
+      html += `<button class="step-nav-btn" onclick="navigateStep('${extendStepId}', 1)">Next →</button>`;
+      html += `</div>`;
+      html += `<div class="step-title">Extended board</div>${boardToSvg(startBoard)}</div>`;
     }
 
     const groups = groupMovesForDisplay(startBoard, moves);
 
     for (const { board: gBoard, moves: gMoves, rowRemovalIdx } of groups) {
       stepCounter++;
+      const stepId = `step-${stepCounter}`;
+      allStepIds.push(stepId);
       const rowsRemoved = rowRemovalIdx >= 0;
       
       // Calculate which rows are being removed
@@ -350,7 +372,11 @@ function renderSolution(initialBoard, phases) {
       const rowText = rowsRemoved 
         ? (removedRows.length > 1 ? ` (removes ${removedRows.length} rows)` : " (removes row)")
         : "";
-      html += `<div class="step">`;
+      html += `<div class="step" id="${stepId}">`;
+      html += `<div class="step-nav">`;
+      html += `<button class="step-nav-btn" onclick="navigateStep('${stepId}', -1)">← Prev</button>`;
+      html += `<button class="step-nav-btn" onclick="navigateStep('${stepId}', 1)">Next →</button>`;
+      html += `</div>`;
       html += `<div class="step-title">Step ${stepCounter}: ${n} move${n!==1?"s":""}${rowText}</div>`;
       html += `<div class="move-list">${descs.join(" ")}</div>`;
       html += boardToSvg(gBoard, gMoves, rowRemovalIdx, removedRows);
@@ -369,10 +395,61 @@ function renderSolution(initialBoard, phases) {
     let finalBoard = startBoard;
     for (const mv of moves) finalBoard = applyMove(finalBoard, mv[0], mv[1]);
     const rem = remainingCount(finalBoard);
-    html += `<div class="step final"><div class="step-title">After ${label}: ` +
+    const finalStepId = `step-final-${pi}`;
+    allStepIds.push(finalStepId);
+    html += `<div class="step final" id="${finalStepId}">`;
+    html += `<div class="step-nav">`;
+    html += `<button class="step-nav-btn" onclick="navigateStep('${finalStepId}', -1)">← Prev</button>`;
+    html += `<button class="step-nav-btn" onclick="navigateStep('${finalStepId}', 1)">Next →</button>`;
+    html += `</div>`;
+    html += `<div class="step-title">After ${label}: ` +
             `${rem} cell${rem!==1?"s":""} remaining</div>${boardToSvg(finalBoard)}</div>`;
   }
+  
+  // Store step IDs globally for navigation
+  window.allStepIds = allStepIds;
+  
+  // Update button states after rendering
+  setTimeout(() => {
+    updateStepNavButtons();
+  }, 0);
+  
   return html;
+}
+
+// ─── Step navigation ─────────────────────────────────────────────────────────
+function navigateStep(currentStepId, direction) {
+  if (!window.allStepIds || window.allStepIds.length === 0) return;
+  
+  const currentIdx = window.allStepIds.indexOf(currentStepId);
+  if (currentIdx === -1) return;
+  
+  const newIdx = currentIdx + direction;
+  if (newIdx < 0 || newIdx >= window.allStepIds.length) return;
+  
+  const targetStepId = window.allStepIds[newIdx];
+  const targetEl = document.getElementById(targetStepId);
+  if (targetEl) {
+    targetEl.scrollIntoView({ behavior: 'auto', block: 'start' });
+  }
+}
+
+function updateStepNavButtons() {
+  if (!window.allStepIds || window.allStepIds.length === 0) return;
+  
+  window.allStepIds.forEach((stepId, idx) => {
+    const stepEl = document.getElementById(stepId);
+    if (!stepEl) return;
+    
+    const navBtns = stepEl.querySelectorAll('.step-nav-btn');
+    if (navBtns.length >= 2) {
+      const prevBtn = navBtns[0];
+      const nextBtn = navBtns[1];
+      
+      prevBtn.disabled = idx === 0;
+      nextBtn.disabled = idx === window.allStepIds.length - 1;
+    }
+  });
 }
 
 // ─── Main solve logic ────────────────────────────────────────────────────────
