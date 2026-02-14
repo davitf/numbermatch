@@ -152,8 +152,13 @@ function boardToSvg(board, moves, highlightIdx) {
 
   const nRows = board.length / ROW_SIZE;
   const w = ROW_SIZE * CELL_SIZE, h = nRows * CELL_SIZE;
-  const highlighted = new Set();
-  for (const [mi, mj] of moves) { highlighted.add(mi); highlighted.add(mj); }
+  // Map cell index to move index (k) so we can use the same color as the line
+  const cellToMoveIdx = new Map();
+  for (let k = 0; k < moves.length; k++) {
+    const [mi, mj] = moves[k];
+    cellToMoveIdx.set(mi, k);
+    cellToMoveIdx.set(mj, k);
+  }
 
   let svg = `<svg viewBox="0 0 ${w} ${h}" xmlns="http://www.w3.org/2000/svg" ` +
             `style="display:block;max-width:100%;height:auto;margin:0 auto">`;
@@ -162,17 +167,22 @@ function boardToSvg(board, moves, highlightIdx) {
     const [r, c] = getRowCol(idx);
     const x = c * CELL_SIZE, y = r * CELL_SIZE;
     const val = board[idx];
-    let fill, stroke;
-    if (highlighted.has(idx))      { fill = "#C8E6C9"; stroke = "#4CAF50"; }
-    else if (val > 0)              { fill = "#F5F5F5"; stroke = "#DDD"; }
+    let fill, stroke, fillOpacity = 1;
+    if (cellToMoveIdx.has(idx)) {
+      const moveIdx = cellToMoveIdx.get(idx);
+      const lineColor = LINE_COLORS[moveIdx % LINE_COLORS.length];
+      fill = lineColor;
+      fillOpacity = 0.3; // Lower opacity for cell background
+      stroke = lineColor; // Stroke uses same color but will be at full opacity
+    } else if (val > 0)              { fill = "#F5F5F5"; stroke = "#DDD"; }
     else if (val === 0)            { fill = "#FAFAFA"; stroke = "#EEE"; }
     else                           { fill = "#FFF";    stroke = "#F5F5F5"; }
 
     svg += `<rect x="${x+2}" y="${y+2}" width="${CELL_SIZE-4}" height="${CELL_SIZE-4}" ` +
-           `fill="${fill}" stroke="${stroke}" rx="4"/>`;
+           `fill="${fill}" fill-opacity="${fillOpacity}" stroke="${stroke}" rx="4"/>`;
 
     if (val > 0) {
-      const fw = highlighted.has(idx) ? "bold" : "normal";
+      const fw = cellToMoveIdx.has(idx) ? "bold" : "normal";
       svg += `<text x="${x+CELL_SIZE/2}" y="${y+CELL_SIZE/2+11}" ` +
              `text-anchor="middle" font-size="30" font-family="monospace" ` +
              `font-weight="${fw}" fill="#333">${val}</text>`;
