@@ -26,24 +26,45 @@
   }
   .input-section textarea:focus { outline: none; border-color: var(--green); }
   .btn {
-    display: inline-block; margin-top: 12px; padding: 10px 28px;
+    display: inline-block; padding: 10px 28px;
     background: var(--green); color: #fff; border: none; border-radius: 6px;
     font-size: 15px; font-weight: 600; cursor: pointer; transition: background .2s;
   }
   .btn:hover { background: #43A047; }
   .btn:disabled { background: #aaa; cursor: not-allowed; }
-  .hint { font-size: 12px; color: #999; margin-top: 6px; }
-  .file-input-wrapper { margin-top: 12px; }
-  .file-input-wrapper input[type="file"] { display: none; }
-  .file-input-label {
-    display: inline-block; padding: 8px 16px; background: #E3F2FD;
-    color: #1976D2; border: 1px solid #90CAF9; border-radius: 6px;
-    cursor: pointer; font-size: 14px; font-weight: 500;
-    transition: background .2s;
+  .btn-secondary {
+    background: #E3F2FD; color: #1976D2; border: 1px solid #90CAF9;
   }
-  .file-input-label:hover { background: #BBDEFB; }
-  .file-input-label:active { background: #90CAF9; }
-  #image-preview { max-width: 100%; margin-top: 12px; border-radius: 6px; display: none; }
+  .btn-secondary:hover { background: #BBDEFB; }
+  .btn-clear {
+    background: #FFEBEE; color: #C62828; border: 1px solid #EF9A9A;
+  }
+  .btn-clear:hover { background: #FFCDD2; }
+  .button-row {
+    display: flex; gap: 12px; margin-top: 12px; flex-wrap: wrap;
+  }
+  .button-row .btn { margin-top: 0; flex: 1; min-width: 100px; }
+  .hint { font-size: 12px; color: #999; margin-top: 6px; }
+  .textarea-wrapper { position: relative; }
+  .spinner-overlay {
+    position: absolute; top: 0; left: 0; right: 0; bottom: 0;
+    background: rgba(255, 255, 255, 0.9); display: none;
+    align-items: center; justify-content: center; border-radius: 6px;
+    z-index: 10;
+  }
+  .spinner-overlay.active { display: flex; }
+  .spinner {
+    width: 40px; height: 40px; border: 4px solid #f3f3f3;
+    border-top: 4px solid var(--green); border-radius: 50%;
+    animation: spin 1s linear infinite;
+  }
+  @keyframes spin {
+    0% { transform: rotate(0deg); }
+    100% { transform: rotate(360deg); }
+  }
+  .file-input-wrapper { display: none; }
+  .file-input-wrapper input[type="file"] { display: none; }
+  #image-preview { max-width: 25%; margin: 12px auto 0; border-radius: 6px; display: none; }
 
   #status {
     font-size: 14px; color: #555; padding: 8px 0; min-height: 24px;
@@ -84,20 +105,26 @@
 
 <div class="input-section">
   <label for="board-input">Enter board</label>
-  <textarea id="board-input" placeholder="147179814
-786565452
-557892137
-61656" spellcheck="false">147179814
+  <div class="textarea-wrapper">
+    <textarea id="board-input" placeholder="123...456
+23...4567" spellcheck="false">147179814
 786565452
 557892137
 61656</textarea>
+    <div class="spinner-overlay" id="spinner-overlay">
+      <div class="spinner"></div>
+    </div>
+  </div>
   <div class="hint">Digits 1-9 for numbers, <code>.</code> for cleared cells. One row per line.</div>
+  <div class="button-row">
+    <button class="btn" id="solve-btn" onclick="startSolve()">Solve</button>
+    <button class="btn btn-clear" id="clear-btn" onclick="clearBoard()">Clear</button>
+    <button class="btn btn-secondary" id="screenshot-btn" onclick="triggerScreenshotUpload()">📷 Screenshot</button>
+  </div>
   <div class="file-input-wrapper">
-    <label for="screenshot-input" class="file-input-label">📷 Upload Screenshot</label>
     <input type="file" id="screenshot-input" accept="image/*" onchange="handleScreenshotUpload(event)">
   </div>
   <img id="image-preview" alt="Screenshot preview">
-  <button class="btn" id="solve-btn" onclick="startSolve()">Solve</button>
 </div>
 
 <div id="status"></div>
@@ -105,6 +132,16 @@
 
 <script>
 "use strict";
+
+// ─── Clear board ────────────────────────────────────────────────────────────
+function clearBoard() {
+  document.getElementById("board-input").value = "";
+}
+
+// ─── Trigger screenshot upload ───────────────────────────────────────────────
+function triggerScreenshotUpload() {
+  document.getElementById("screenshot-input").click();
+}
 
 // ─── Screenshot Processing (UI handler) ─────────────────────────────────────
 async function handleScreenshotUpload(event) {
@@ -114,20 +151,40 @@ async function handleScreenshotUpload(event) {
   const statusEl = document.getElementById("status");
   const previewEl = document.getElementById("image-preview");
   const textareaEl = document.getElementById("board-input");
+  const spinnerEl = document.getElementById("spinner-overlay");
+
+  // Show spinner
+  spinnerEl.classList.add("active");
+  statusEl.textContent = "Processing screenshot...";
 
   // Show preview
   const reader = new FileReader();
   reader.onload = async (e) => {
     previewEl.src = e.target.result;
     previewEl.style.display = "block";
-    statusEl.textContent = "Processing screenshot...";
     try {
       const boardStr = await processScreenshot(e.target.result, (status) => {
         statusEl.textContent = status;
       });
+      
+      // Update textarea first
       textareaEl.value = boardStr;
-      statusEl.textContent = "Board extracted! Check the textarea and adjust if needed.";
+      
+      // Force a reflow to ensure the textarea update is painted
+      void textareaEl.offsetHeight;
+      
+      // Remove spinner and update status
+      spinnerEl.classList.remove("active");
+      statusEl.textContent = "Board extracted! Starting solve...";
+      
+      // Allow browser to paint the UI updates before starting solve
+      requestAnimationFrame(() => {
+        setTimeout(() => {
+          startSolve();
+        }, 150);
+      });
     } catch (err) {
+      spinnerEl.classList.remove("active");
       statusEl.textContent = "Error: " + err.message;
       console.error(err);
     }
